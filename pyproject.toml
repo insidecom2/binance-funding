@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "binance-funding"
+version = "0.1.0"
+description = "Binance funding rate helper CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "joy" }
+]
+dependencies = [
+  "requests>=2.31.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0"
+]
+
+[project.scripts]
+binance-funding = "binance_funding.main:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
