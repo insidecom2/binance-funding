@@ -1,3 +1,5 @@
+mode: analyze
+
 symbols:
   - BTCUSDT
   - ETHUSDT
@@ -15,4 +17,5 @@ symbols:
   - ARBUSDT
 
 limit: 100
+top: 10
 position_size: 1.0

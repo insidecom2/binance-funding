@@ -11,10 +11,18 @@ Python starter project for fetching and exploring Binance Futures funding rates.
 pip install -e .
 ```
 
-3. Run the CLI:
+3. Configure [config.yaml](config.yaml):
+
+- `mode`: `analyze` | `execute` | `summary` | `raw`
+- `symbols`: list of symbols
+- `limit`: historical records to fetch
+- `top`: top N opportunities for analyze mode
+- `position_size`: position size per trade
+
+4. Run the CLI (no arguments):
 
 ```bash
-binance-funding --symbol BTCUSDT --limit 5
+binance-funding
 ```
 
 ## Development
