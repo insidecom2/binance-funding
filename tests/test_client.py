@@ -23,7 +23,7 @@ def test_get_funding_rates_returns_list(monkeypatch):
     monkeypatch.setattr("binance_funding.client.requests.get", fake_get)
 
     client = BinanceFundingClient()
-    result = client.get_funding_rates("btcusdt", limit=1)
+    result = client.get_funding_rates("btcusdt", '124567',limit=1)
     assert result == payload
 
 
@@ -35,4 +35,4 @@ def test_get_funding_rates_raises_for_invalid_payload(monkeypatch):
 
     client = BinanceFundingClient()
     with pytest.raises(ValueError):
-        client.get_funding_rates("BTCUSDT", limit=1)
+        client.get_funding_rates("BTCUSDT", '124567', limit=1)

@@ -52,7 +52,14 @@ class FundingRateArbitrageStrategy:
         # Step 1 & 2: Get funding rates and analyze trend
         for symbol in symbols:
             rows = self.client.get_funding_rates(symbol=symbol, limit=limit)
-            analysis = analyze_funding_trend(rows, position_size=self.position_size)
+            try:
+                # Get current market price for accurate profit calculation
+                current_price = self.client.get_current_price(symbol)
+                analysis = analyze_funding_trend(rows, position_size=self.position_size, current_price=current_price)
+            except Exception as e:
+                print(f"⚠️  Could not fetch price for {symbol}, using fallback: {e}")
+                analysis = analyze_funding_trend(rows, position_size=self.position_size)
+            
             if analysis:
                 all_analyses.append(analysis)
         
@@ -141,7 +148,6 @@ class FundingRateArbitrageStrategy:
             funding_time_unix_ms=funding_time_unix_ms,
             delay_after_funding_minutes=5,
             callback=self._close_position_callback,
-            symbol=symbol,
             spot_price=spot_price,
         )
         

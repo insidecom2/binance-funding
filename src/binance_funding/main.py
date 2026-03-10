@@ -15,6 +15,7 @@ def main() -> None:
     limit = int(config.get("limit", 100))
     top_n = int(config.get("top", 10))
     mode = str(config.get("mode", "analyze")).lower()
+    future_api_key = str(config.get("future_api_key", "123456789"))
 
     if mode == "analyze":
         print("📊 Analyzing funding rate opportunities...\n")

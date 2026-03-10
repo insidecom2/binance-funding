@@ -16,13 +16,14 @@ class FundingAnalysis:
     risk_negative: bool
     
 
-def analyze_funding_trend(rates: list[dict[str, Any]], position_size: float = 1.0) -> FundingAnalysis | None:
+def analyze_funding_trend(rates: list[dict[str, Any]], position_size: float = 1.0, current_price: float | None = None) -> FundingAnalysis | None:
     """
     Analyze funding rate trend and calculate profit potential.
     
     Args:
         rates: List of funding rate records from API
         position_size: Position size in asset amount (default 1.0 for 1 BTC)
+        current_price: Current market price of the symbol
     
     Returns:
         FundingAnalysis with trend and profit calculation
@@ -49,11 +50,20 @@ def analyze_funding_trend(rates: list[dict[str, Any]], position_size: float = 1.
     else:
         trend = "stable"
     
-    # Calculate profit (funding every 8 hours for short position)
-    # Funding = position_size * price * funding_rate
-    # Assuming price ~42000 for BTC (approximate)
-    approximate_btc_price = 42000
-    projected_profit = position_size * approximate_btc_price * current_rate
+    # Calculate profit using real price if provided
+    if current_price is None:
+        # Fallback to approximate prices for common symbols
+        price_lookup = {
+            "BTCUSDT": 42000, "ETHUSDT": 2300, "BNBUSDT": 320,
+            "ADAUSDT": 0.5, "DOGEUSDT": 0.08, "SOLUSDT": 90,
+            "XRPUSDT": 0.6, "MATICUSDT": 0.8, "LINKUSDT": 18,
+            "LTCUSDT": 70, "AVAXUSDT": 25, "UNIUSDT": 6,
+            "ATOMUSDT": 8, "ARBUSDT": 1.2
+        }
+        current_price = price_lookup.get(symbol, 100)  # Default $100
+    
+    # Funding happens every 8 hours, so 3x per day for short position
+    projected_profit = position_size * current_price * current_rate
     
     # Risk: is funding going negative?
     risk_negative = current_rate < 0 or (trend == "downward" and current_rate < avg_rate)
@@ -90,12 +100,20 @@ def rank_by_funding(analyses: list[FundingAnalysis], top_n: int = 10) -> list[Fu
 
 def format_analysis(analysis: FundingAnalysis) -> dict[str, Any]:
     """Format analysis result for display."""
+    # Calculate daily profit (funding happens 3x per day)
+    daily_profit = analysis.projected_profit_usdt * 3
+    annual_profit = daily_profit * 365
+    
     return {
         "symbol": analysis.symbol,
         "current_funding_rate": f"{analysis.current_rate:.6f}",
+        "current_funding_rate_percent": f"{analysis.current_rate * 100:.4f}%",
         "previous_funding_rate": f"{analysis.previous_rate:.6f}",
         "trend": analysis.trend,
         "avg_funding_rate": f"{analysis.avg_rate:.6f}",
-        "projected_profit_8hrs": f"${analysis.projected_profit_usdt:.2f}",
+        "profit_per_funding": f"${analysis.projected_profit_usdt:.4f}",
+        "profit_per_day": f"${daily_profit:.4f}",
+        "profit_per_year": f"${annual_profit:.0f}",
         "risk_going_negative": analysis.risk_negative,
+        "next_funding_in_hours": "≤8hrs",  # Funding happens every 8 hours
     }
