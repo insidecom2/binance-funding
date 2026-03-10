@@ -54,6 +54,7 @@ class FundingRateArbitrageStrategy:
             rows = self.client.get_funding_rates(symbol=symbol, limit=limit)
             try:
                 # Get current market price for accurate profit calculation
+                print(f"Getting current price for {symbol}...")
                 current_price = self.client.get_current_price(symbol)
                 analysis = analyze_funding_trend(rows, position_size=self.position_size, current_price=current_price)
             except Exception as e:
@@ -62,7 +63,8 @@ class FundingRateArbitrageStrategy:
             
             if analysis:
                 all_analyses.append(analysis)
-        
+            
+    
         # Rank by funding rate
         ranked_funding = rank_by_funding(all_analyses, top_n=top_n)
         
