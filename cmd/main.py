@@ -73,7 +73,6 @@ def display_short_opportunities(opportunities: list, limit: int = 5):
     if not opportunities:
         print("❌ No SHORT opportunities found")
         return
-        print(f"   GROSS: $1K=${profit_1k:.2f} | $10K=${profit_10k:.2f} per 8h (before fees)")
     print(f"\n🎯 TOP {min(limit, len(opportunities))} OPTIMAL Rates (0.04%-0.08%) | {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 80)
     print("💰 OPTIMAL = Sweet spot for funding profits")
@@ -122,7 +121,7 @@ def display_short_opportunities(opportunities: list, limit: int = 5):
         timing = get_optimal_timing(xgb_risk)
         
         print(f"{i}. {profit_emoji} {opp['symbol']:<12} | Rate: +{funding_rate:.4f}% | {profit_level}")
-        print(f"   � GROSS: $1K=${profit_1k:.2f} | $10K=${profit_10k:.2f} per 8h (before fees)")
+        print(f"   💵 GROSS: $1K=${profit_1k:.2f} | $10K=${profit_10k:.2f} per 8h (before fees)")
         print(f"   💸 FEES: Entry+Exit = ${net_1k['trading_fees']:.2f} (0.08% total)")
         print(f"   {net_1k['profit_color']} NET: $1K=${net_1k['net_profit']:+.2f} | $10K=${net_10k['net_profit']:+.2f} per 8h")
         print(f"   📊 Fee Coverage: {net_1k['fee_coverage_ratio']:.1f}x | {net_1k['profitability']}")
