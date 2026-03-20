@@ -15,9 +15,8 @@ Focus: Find high funding rates to profit from SHORT positions.
 """
 
 import sys
-import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 
 # Handle ML dependencies
@@ -38,12 +37,13 @@ except ImportError:
 # Add src to path so we can import our module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.binance import BinanceFunding, FundingBot, auto_get_max_funding, get_best_funding_opportunity
-from src.xgb import predict_xgb_risk, predict_multi_round_sustainability, get_multi_round_recommendation, calculate_net_profit_with_fees, create_xgb_risk_features, get_optimal_timing
+from src.binance import BinanceFunding
+from src.xgb import predict_xgb_risk, predict_multi_round_sustainability, calculate_net_profit_with_fees, get_optimal_timing
 
 # Set logging to WARNING to reduce noise
 logging.getLogger('src.binance').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
 
 def format_timestamp(timestamp_ms: int) -> str:
@@ -73,7 +73,7 @@ def display_short_opportunities(opportunities: list, limit: int = 5):
     if not opportunities:
         print("❌ No SHORT opportunities found")
         return
-    
+        print(f"   GROSS: $1K=${profit_1k:.2f} | $10K=${profit_10k:.2f} per 8h (before fees)")
     print(f"\n🎯 TOP {min(limit, len(opportunities))} OPTIMAL Rates (0.04%-0.08%) | {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 80)
     print("💰 OPTIMAL = Sweet spot for funding profits")
@@ -225,64 +225,6 @@ def get_symbol_risk_level(symbol: str) -> tuple:
 
 
 # create_xgb_risk_features moved to src/xgb/risk_predictor.py
-
-
-# get_optimal_timing moved to src/xgb/risk_predictor.py
-def get_optimal_timing(xgb_risk: dict) -> dict:
-    """Calculate optimal entry/exit timing based on funding schedule and risk"""
-    # Funding happens every 8 hours: 00:00, 08:00, 16:00 UTC
-    base_funding_times = [0, 8, 16]
-    current_utc = datetime.now()
-    current_hour = current_utc.hour
-    
-    # Find next funding time
-    next_funding_hour = None
-    for h in base_funding_times:
-        if h > current_hour:
-            next_funding_hour = h
-            break
-    
-    if next_funding_hour is None:
-        next_funding_hour = base_funding_times[0] + 24  # Next day first funding
-        
-    if next_funding_hour >= 24:
-        next_funding_hour -= 24
-        next_funding_day = current_utc + timedelta(days=1)
-    else:
-        next_funding_day = current_utc
-        
-    next_funding_dt = datetime(next_funding_day.year, next_funding_day.month, next_funding_day.day, next_funding_hour)
-    minutes_to_funding = int((next_funding_dt - current_utc).total_seconds() / 60)
-    
-    # Entry timing recommendations
-    if minutes_to_funding <= 30:
-        entry_timing = "URGENT: Enter NOW! (Before funding!)"
-        entry_color = "\ud83d\udd25"
-    elif minutes_to_funding <= 90:
-        entry_timing = "Good timing - Enter soon"
-        entry_color = "⚡"
-    else:
-        entry_timing = "Wait closer to funding time"
-        entry_color = "⏳"
-        
-    # Exit timing based on risk and hold rounds
-    exit_rounds = xgb_risk['recommended_hold_rounds']
-    exit_time = next_funding_dt + timedelta(hours=8 * exit_rounds)
-    
-    if exit_rounds == 1:
-        exit_timing = f"Exit after next funding ({exit_time.strftime('%H:%M')} UTC)"
-    else:
-        exit_timing = f"Exit after {exit_rounds} rounds ({exit_time.strftime('%H:%M')} UTC)"
-        
-    return {
-        'entry_timing': entry_timing,
-        'entry_color': entry_color,
-        'exit_timing': exit_timing,
-        'minutes_to_funding': minutes_to_funding,
-        'next_funding_time': next_funding_dt.strftime('%H:%M UTC')
-    }
-
-
 # predict_multi_round_sustainability moved to src/xgb/risk_predictor.py
 
 
