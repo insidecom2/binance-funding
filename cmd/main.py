@@ -82,12 +82,21 @@ def display_short_opportunities(opportunities: list, limit: int = 5):
     print("🔴 LIVE RATES - Real-time data, not historical!")
     print()
     
+    from src.binance.trading_bot import FundingBot
+    bot = FundingBot()
     for i, opp in enumerate(opportunities[:limit], 1):
+        # Fetch EMA/RSI info for this symbol
+        ema_rsi_info = bot.get_ema_rsi_info(opp['symbol'], interval="1h", limit=100)
         max_info = opp['max_rate']
         score = opp['opportunity_score']
         funding_rate = max_info['value'] * 100  # Convert to percentage
         
         # Calculate potential profits for different position sizes
+        # Show EMA/RSI/Price info if available
+        if 'error' not in ema_rsi_info:
+            print(f"   📈 EMA20: {ema_rsi_info['ema20']:.2f} | EMA50: {ema_rsi_info['ema50']:.2f} | Trend: {ema_rsi_info['ema_trend'].upper()} | RSI: {ema_rsi_info['rsi']:.2f}")
+        else:
+            print(f"   📈 EMA/RSI: {ema_rsi_info['error']}")
         rate_decimal = max_info['value']
         profit_1k = 1000 * rate_decimal  # Per $1000 position
         profit_10k = 10000 * rate_decimal  # Per $10k position  
@@ -362,4 +371,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # แสดงผล EMA20, EMA50, trend, RSI ของ BTCUSDT (ตัวอย่าง)
+    from src.binance.trading_bot import FundingBot
+    bot = FundingBot()
+    ema_rsi_info = bot.get_ema_rsi_info("BTCUSDT", interval="1h", limit=100)
+    if 'error' not in ema_rsi_info:
+        print(f"\n📈 EMA/RSI Info for BTCUSDT:")
+        print(f"EMA20: {ema_rsi_info['ema20']:.2f} | EMA50: {ema_rsi_info['ema50']:.2f} | Trend: {ema_rsi_info['ema_trend'].upper()} | RSI: {ema_rsi_info['rsi']:.2f}")
+    else:
+        print(f"EMA/RSI Error: {ema_rsi_info['error']}")
     main()

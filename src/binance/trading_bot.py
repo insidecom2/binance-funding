@@ -23,6 +23,8 @@ import asyncio
 import time
 import logging
 from typing import List, Dict, Any, Optional, Callable
+import pandas as pd
+import ta
 from datetime import datetime, timedelta
 import json
 
@@ -37,6 +39,40 @@ class FundingBot:
     
     Monitors funding rates and provides automated trading capabilities
     """
+
+    def get_ema_rsi_info(self, symbol: str, interval: str = "1h", limit: int = 100) -> Dict[str, Any]:
+        """
+        Fetch klines and calculate EMA20, EMA50, RSI for the symbol
+        Args:
+            symbol (str): Trading symbol (e.g., "BTCUSDT")
+            interval (str): Kline interval (default: 1h)
+            limit (int): Number of klines to fetch (default: 100)
+        Returns:
+            Dict: Latest EMA20, EMA50, RSI, trend info
+        """
+        with BinanceFunding() as client:
+            klines = client.get_klines(symbol, interval=interval, limit=limit)
+        if not klines or len(klines) < 51:
+            return {"error": "Not enough kline data"}
+        df = pd.DataFrame(klines, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_asset_volume", "number_of_trades",
+            "taker_buy_base", "taker_buy_quote", "ignore"
+        ])
+        df["close"] = df["close"].astype(float)
+        # Calculate EMA20, EMA50, RSI
+        df["ema20"] = ta.trend.ema_indicator(df["close"], window=20)
+        df["ema50"] = ta.trend.ema_indicator(df["close"], window=50)
+        df["rsi"] = ta.momentum.rsi(df["close"], window=14)
+        last = df.iloc[-1]
+        trend = "sell" if last["ema20"] < last["ema50"] else "buy"
+        return {
+            "symbol": symbol,
+            "ema20": last["ema20"],
+            "ema50": last["ema50"],
+            "ema_trend": trend,
+            "rsi": last["rsi"]
+        }
     
     def __init__(self, 
                  check_interval: int = 300,  # 5 minutes

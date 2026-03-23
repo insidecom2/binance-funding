@@ -33,9 +33,33 @@ class BinanceFundingError(Exception):
 
 
 class BinanceFunding:
-    """Client for fetching Binance Futures funding rate and premium index data"""
-    
+
     BASE_URL = "https://fapi.binance.com"
+
+    def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
+        """
+        Get historical candlestick (kline) data from Binance Futures API
+        Args:
+            symbol (str): Trading symbol (e.g., "BTCUSDT")
+            interval (str): Kline interval (e.g., "1m", "5m", "1h", "1d")
+            limit (int): Number of records to return (default: 100, max: 1500)
+            start_time (int, optional): Start timestamp in milliseconds
+            end_time (int, optional): End timestamp in milliseconds
+        Returns:
+            list: List of kline data (open, high, low, close, volume, ...)
+        """
+        params = {
+            'symbol': symbol,
+            'interval': interval,
+            'limit': min(limit, 1500)
+        }
+        if start_time:
+            params['startTime'] = start_time
+        if end_time:
+            params['endTime'] = end_time
+        logger.info(f"Fetching klines for {symbol} interval={interval} limit={limit}")
+        data = self._make_request("/fapi/v1/klines", params)
+        return data
     
     def __init__(self, timeout: int = 30, retries: int = 3):
         """
