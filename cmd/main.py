@@ -18,6 +18,7 @@ import sys
 import logging
 from datetime import datetime
 import os
+import time
 
 # Handle ML dependencies
 try:
@@ -39,6 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.binance import BinanceFunding
 from src.xgb import predict_xgb_risk, predict_multi_round_sustainability, calculate_net_profit_with_fees, get_optimal_timing
+from src.binance.trading_bot import FundingBot
 
 # Set logging to WARNING to reduce noise
 logging.getLogger('src.binance').setLevel(logging.WARNING)
@@ -178,6 +180,59 @@ def display_short_opportunities(opportunities: list, limit: int = 5):
     print("📝 Risk: Price movement can exceed funding profits")
 
 
+def get_symbol_risk_level(symbol: str) -> tuple:
+    """Simple placeholder - replaced by XGB prediction"""
+    return ('🤖', 'ML')
+
+
+# create_xgb_risk_features moved to src/xgb/risk_predictor.py
+# predict_multi_round_sustainability moved to src/xgb/risk_predictor.py
+
+
+# get_multi_round_recommendation moved to src/xgb/risk_predictor.py
+
+
+# predict_xgb_risk moved to src/xgb/risk_predictor.py
+
+
+def get_all_current_funding_opportunities():
+    """Get current live funding rates for ALL symbols at once (faster)"""
+    opportunities = []
+    try:
+        with BinanceFunding() as client:
+            all_premium_data = client.get_premium_index()  # No symbol = all symbols
+            for data in all_premium_data:
+                symbol = data['symbol']
+                if not symbol.endswith('USDT'):
+                    continue
+                try:
+                    current_rate = float(data['lastFundingRate'])
+                    opportunity = {
+                        'symbol': symbol,
+                        'max_rate': {
+                            'value': current_rate,
+                            'percentage': current_rate * 100,
+                            'time': int(data['nextFundingTime']) - (8 * 60 * 60 * 1000),
+                            'mark_price': float(data['markPrice'])
+                        },
+                        'opportunity_score': {
+                            'overall_score': min(100, abs(current_rate) * 100000),
+                            'opportunity_type': 'SHORT_OPPORTUNITY' if current_rate > 0 else 'LONG_OPPORTUNITY',
+                            'signal_strength': 'STRONG' if abs(current_rate) > 0.01 else 'MODERATE' if abs(current_rate) > 0.005 else 'WEAK'
+                        },
+                        'next_funding_time': int(data['nextFundingTime']),
+                        'is_live': True
+                    }
+                    opportunities.append(opportunity)
+                except (ValueError, KeyError) as e:
+                    logger.warning(f"Skipping {symbol}: {e}")
+                    continue
+    except Exception as e:
+        logger.error(f"Failed to get funding data: {e}")
+        return []
+    return opportunities
+
+
 def display_top_opportunities(opportunities: list, limit: int = 5):
     """Display top funding opportunities (1-5 results)"""
     if not opportunities:
@@ -226,81 +281,11 @@ def display_top_opportunities(opportunities: list, limit: int = 5):
     else:
         print("⏳ Market is relatively quiet. Monitor for better opportunities.")
 
-
-def get_symbol_risk_level(symbol: str) -> tuple:
-    """Simple placeholder - replaced by XGB prediction"""
-    return ('🤖', 'ML')
-
-
-# create_xgb_risk_features moved to src/xgb/risk_predictor.py
-# predict_multi_round_sustainability moved to src/xgb/risk_predictor.py
-
-
-# get_multi_round_recommendation moved to src/xgb/risk_predictor.py
-
-
-# predict_xgb_risk moved to src/xgb/risk_predictor.py
-
-
-def get_all_current_funding_opportunities():
-    """Get current live funding rates for ALL symbols at once (faster)"""
-    opportunities = []
-    
-    try:
-        with BinanceFunding() as client:
-            # Get ALL premium index data in one call (much faster)
-            logger.info("Fetching ALL symbols funding data in one API call...")
-            all_premium_data = client.get_premium_index()  # No symbol = all symbols
-            
-            logger.info(f"Processing {len(all_premium_data)} symbols...")
-            
-            for data in all_premium_data:
-                symbol = data['symbol']
-                
-                # Only process USDT pairs
-                if not symbol.endswith('USDT'):
-                    continue
-                    
-                try:
-                    current_rate = float(data['lastFundingRate'])
-                    
-                    # Create opportunity data structure
-                    opportunity = {
-                        'symbol': symbol,
-                        'max_rate': {
-                            'value': current_rate,
-                            'percentage': current_rate * 100,
-                            'time': int(data['nextFundingTime']) - (8 * 60 * 60 * 1000),
-                            'mark_price': float(data['markPrice'])
-                        },
-                        'opportunity_score': {
-                            'overall_score': min(100, abs(current_rate) * 100000),
-                            'opportunity_type': 'SHORT_OPPORTUNITY' if current_rate > 0 else 'LONG_OPPORTUNITY',
-                            'signal_strength': 'STRONG' if abs(current_rate) > 0.01 else 'MODERATE' if abs(current_rate) > 0.005 else 'WEAK'
-                        },
-                        'next_funding_time': int(data['nextFundingTime']),
-                        'is_live': True
-                    }
-                    opportunities.append(opportunity)
-                    
-                except (ValueError, KeyError) as e:
-                    logger.warning(f"Skipping {symbol}: {e}")
-                    continue
-                    
-    except Exception as e:
-        logger.error(f"Failed to get funding data: {e}")
-        return []
-        
-    return opportunities
-
-
 def main():
     """Trading bot main entry point - scans ALL symbols for top 5 rates"""
-    
     print("🤖 Binance Funding Rate Trading Bot")
     print("🔍 Scanning for OPTIMAL rates (0.04% - 0.08%)...")
     print("🎯 Sweet spot: Good profits without extreme risk")
-    
     try:
         # Get current live funding rates for ALL symbols (single API call)
         print("🚀 Fetching ALL funding rates in one shot...")
@@ -315,30 +300,30 @@ def main():
         # Sort by rate (highest first) and take top 5 SHORT opportunities
         opportunities.sort(key=lambda x: x['max_rate']['value'], reverse=True)
         
-        # Filter for optimal funding rate range (0.04% - 0.08%)
-        min_rate = 0.0004  # 0.04%
-        max_rate = 0.0008  # 0.08%
+        # Filter for optimal funding rate range (0.05% - 0.10%)
+        min_rate = 0.0005  # 0.05%
+        max_rate = 0.0010  # 0.10%
         
         optimal_opportunities = [
             opp for opp in opportunities 
             if min_rate <= opp['max_rate']['value'] <= max_rate
         ]
         
-        print(f"🎯 Found {len(optimal_opportunities)} symbols in optimal range (0.04% - 0.08%)")
+        print(f"🎯 Found {len(optimal_opportunities)} symbols in optimal range (0.05% - 0.10%)")
         
         # If no optimal rates found, show nearby rates
         if not optimal_opportunities:
-            print("❌ No rates found in optimal range (0.04% - 0.08%)")
+            print("❌ No rates found in optimal range (0.05% - 0.10%)")
             
-            # Show rates above 0.08% (too high - risky)
+            # Show rates above 0.10% (too high - risky)
             high_rates = [opp for opp in opportunities if opp['max_rate']['value'] > max_rate][:3]
             if high_rates:
-                print(f"\n⚠️  {len(high_rates)} rates ABOVE 0.08% (high risk):")
+                print(f"\n⚠️  {len(high_rates)} rates ABOVE 0.10% (high risk):")
                 for opp in high_rates:
                     rate_pct = opp['max_rate']['percentage']
                     print(f"   {opp['symbol']:<15} | {rate_pct:>+.4f}%")
             
-            # Show rates between 0.02-0.04% (lower but safer)
+            # Show rates between 0.02-0.05% (lower but safer)
             medium_rates = [opp for opp in opportunities if 0.0002 <= opp['max_rate']['value'] < min_rate][:3]
             if medium_rates:
                 print(f"\n📊 {len([o for o in opportunities if 0.0002 <= o['max_rate']['value'] < min_rate])} rates in 0.02-0.04% range:")
@@ -360,15 +345,12 @@ def main():
             next_funding_min = (top_5_optimal[0]['next_funding_time'] - int(datetime.now().timestamp() * 1000)) // (1000 * 60)
             print(f"⭐ OPTIMAL RANGE: Profitable but not too risky!")
             print(f"🔴 Next funding in ~{next_funding_min}min - Perfect timing for balanced risk!")
-    
     except Exception as e:
         print(f"❌ Error: {e}")
         sys.exit(1)
-        
     except KeyboardInterrupt:
         print("\n⏹️ Interrupted by user")
         sys.exit(0)
-
 
 if __name__ == "__main__":
     # แสดงผล EMA20, EMA50, trend, RSI ของ BTCUSDT (ตัวอย่าง)
