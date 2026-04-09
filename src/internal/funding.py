@@ -31,7 +31,6 @@ def display_short_opportunities(opportunities: list, limit: int = 5):
     if not opportunities:
         print("❌ No SHORT opportunities found")
         return
-    print(f"\n🎯 TOP {min(limit, len(opportunities))} OPTIMAL Rates (0.04%-0.08%) | {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 80)
     print("💰 OPTIMAL = Sweet spot for funding profits")
     print("🎯 Range: 0.04-0.08% = Good profits + Reasonable risk")

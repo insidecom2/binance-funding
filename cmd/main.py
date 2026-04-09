@@ -9,18 +9,18 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.binance.trading_bot import FundingBot
-from src.internal.funding import get_all_current_funding_opportunities, display_short_opportunities
+from src.internal.funding import get_all_current_funding_opportunities
 
 from src.internal.filter import filter_opportunities, select_best_opportunity
 
 
-MIN_FUNDING = 0.0005
+MIN_FUNDING = 0.0002
 MIN_FUNDING_EXIT = 0
-MIN_BASIS = 0
+MIN_BASIS = 0.0005
 MIN_BASIS_EXIT = -0.001
-MIN_VOLUME = 1_000_000
-MAX_SPREAD = 0.002
-MIN_PROFIT = 0.0002
+MIN_VOLUME = 500_000
+MAX_SPREAD = 0.004
+MAX_RISK = 0.5
 
 RISK_PER_TRADE = 0.1
 MAX_POSITION = 1000
@@ -81,9 +81,8 @@ def get_funding_symbol_rate() -> list:
                 print(f"   {opp['symbol']:<15} | {rate_pct:>+.4f}%")
         return []
         
-    # Show top 5 optimal opportunities
+    # Skip verbose per-symbol block to keep logs concise.
     top_5_optimal = optimal_opportunities[:5]
-    display_short_opportunities(top_5_optimal, len(top_5_optimal))
         
     # Market summary for optimal rates
     # avg_optimal_rate = sum(opp['max_rate']['value'] for opp in top_5_optimal) / len(top_5_optimal)
@@ -109,18 +108,39 @@ def main():
         
         # Filter and rank by risk, basis, funding, volume, spread, net profit
         if opportunities:
-            filtered = filter_opportunities(opportunities)
-            print(f"\n🏆 Filtered Opportunities (risk ต่ำ, basis > 0.10%, funding rate สูง, volume สูง, spread ต่ำ, กำไรสุทธิสูงสุด):")
+            filtered = filter_opportunities(
+                opportunities,
+                min_basis=MIN_BASIS,
+                min_funding=MIN_FUNDING,
+                min_volume=MIN_VOLUME,
+                max_spread=MAX_SPREAD,
+                max_risk=MAX_RISK,
+                position_size=MAX_POSITION,
+            )
+            print(
+                "\n🏆 Filtered Opportunities "
+                f"(risk <= {MAX_RISK:.2f}, basis > {MIN_BASIS:.2%}, funding >= {MIN_FUNDING:.2%}, "
+                f"volume >= {MIN_VOLUME:,.0f}, spread <= {MAX_SPREAD:.2%}, กำไรสุทธิสูงสุด):"
+            )
             for i, opp in enumerate(filtered, 1):
-                print(f"{i}. {opp['symbol']} | risk={opp['risk']:.2f} | basis={opp['basis']:+.4%} | funding={opp['funding_rate']:+.4%} | volume={opp['volume']:.0f} | spread={opp['spread']:.4%} | net_profit={opp['net_profit']:.6f}")
+                selected_rounds = opp.get('selected_rounds', 1)
+                print(f"{i}. {opp['symbol']} | risk={opp['risk']:.2f} | basis={opp['basis']:+.4%} | funding={opp['funding_rate']:+.4%} | volume={opp['volume']:.0f} | spread={opp['spread']:.4%} | net_profit={opp['net_profit']:.6f} | rounds={selected_rounds}")
             if not filtered:
                 print("❌ No opportunities passed all filters.")
 
-            # เลือกเหรียญที่ผ่านเงื่อนไข จำนวนรอบมากสุด เสี่ยงน้อยสุด
-            best = select_best_opportunity(opportunities)
+            # เลือกเหรียญที่ผ่านเงื่อนไข โดยเน้นกำไรสุทธิสูงสุดและใช้ risk ต่ำเป็นตัวตัดสินรอง
+            best = select_best_opportunity(
+                opportunities,
+                min_basis=MIN_BASIS,
+                min_funding=MIN_FUNDING,
+                min_volume=MIN_VOLUME,
+                max_spread=MAX_SPREAD,
+                max_risk=MAX_RISK,
+                position_size=MAX_POSITION,
+            )
             if best:
                 print("\n⭐️ Best Opportunity:")
-                print(f"{best['symbol']} | risk={best['risk']:.2f} | basis={best['basis']:+.4%} | funding={best['funding_rate']:+.4%} | volume={best['volume']:.0f} | spread={best['spread']:.4%} | net_profit={best['net_profit']:.6f} | best_rounds={best['best_rounds']}")
+                print(f"{best['symbol']} | risk={best['risk']:.2f} | basis={best['basis']:+.4%} | funding={best['funding_rate']:+.4%} | volume={best['volume']:.0f} | spread={best['spread']:.4%} | net_profit={best['net_profit']:.6f} | selected_rounds={best['best_rounds']}")
             else:
                 print("❌ No symbol passed all strict filters for best opportunity.")
 
