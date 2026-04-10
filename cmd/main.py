@@ -112,13 +112,17 @@ def notify_forecast_passed_symbols(opportunities: list) -> None:
     now_ts = datetime.now().timestamp()
     cooldown_seconds = TELEGRAM_NOTIFY_COOLDOWN_MINUTES * 60
     cache = _load_notify_cache()
+    gate_passed_count = 0
+    gate_passed_symbols = []
     passed = []
     for opp in opportunities:
         forecast = opp.get("funding_forecast") or {}
         if forecast.get("is_valid") and forecast.get("confidence_pass") and forecast.get("forecast_pass"):
+            gate_passed_count += 1
             symbol = opp.get("symbol")
             if not symbol:
                 continue
+            gate_passed_symbols.append(symbol)
             last_sent = float(cache.get(symbol, 0) or 0)
             if now_ts - last_sent < cooldown_seconds:
                 remaining_sec = int(cooldown_seconds - (now_ts - last_sent))
@@ -126,8 +130,20 @@ def notify_forecast_passed_symbols(opportunities: list) -> None:
                 continue
             passed.append((opp, forecast))
 
+    if gate_passed_symbols:
+        print(
+            "🧾 Forecast-passed symbols for notification: "
+            + ", ".join(gate_passed_symbols)
+        )
+
     if not passed:
-        print("📭 No symbols passed forecast gate for Telegram notification")
+        if gate_passed_count > 0:
+            print(
+                "📭 Forecast passed but no Telegram sent "
+                f"(all {gate_passed_count} symbol(s) still in cooldown)"
+            )
+        else:
+            print("📭 No symbols passed forecast gate for Telegram notification")
         return
 
     lines = ["Forecast passed symbols"]
@@ -274,6 +290,19 @@ def get_funding_symbol_rate() -> list:
                 f"r2={f.get('r_squared', 0):.3f} "
                 f"reason={f.get('fail_reason')}"
             )
+
+        forecast_passed = []
+        for opp in top_5_optimal:
+            f = opp.get('funding_forecast') or {}
+            if f.get('is_valid') and f.get('confidence_pass') and f.get('forecast_pass'):
+                forecast_passed.append(opp)
+
+        if forecast_passed:
+            names = ", ".join(o.get('symbol', '-') for o in forecast_passed)
+            print(f"✅ Forecast-passed symbols ({len(forecast_passed)}): {names}")
+        else:
+            print("❌ Forecast-passed symbols (0): none")
+
         save_forecast_passed_symbols_to_mysql(top_5_optimal)
         notify_forecast_passed_symbols(top_5_optimal)
         
