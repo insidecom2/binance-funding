@@ -20,6 +20,7 @@ def select_best_opportunity(
     max_risk=0.5,
     max_rounds=5,
     position_size=1000,
+    require_forecast=False,
 ):
     """
     เลือกเหรียญที่ผ่านทุกเงื่อนไข โดยเน้นกำไรสุทธิสูงสุดก่อน และใช้ risk ต่ำสุดเป็นตัวตัดสินรอง
@@ -31,6 +32,14 @@ def select_best_opportunity(
         funding_rate = opp['max_rate']['value']
         if funding_rate < min_funding:
             continue
+        if require_forecast:
+            forecast = opp.get('funding_forecast')
+            if not forecast or not forecast.get('is_valid'):
+                continue
+            if not forecast.get('confidence_pass'):
+                continue
+            if not forecast.get('forecast_pass'):
+                continue
         risk_info = predict_xgb_risk(symbol, funding_rate, opp['max_rate'].get('mark_price', 0), opp['opportunity_score']['overall_score'])
         risk = risk_info['score']
         normalized_risk = _normalize_risk_score(risk)
@@ -67,6 +76,7 @@ def select_best_opportunity(
             'best_rounds': best_rounds,
             'mark_price': mark_price,
             'index_price': index_price,
+            'funding_forecast': opp.get('funding_forecast'),
         }
         if (
             best is None
@@ -94,6 +104,7 @@ def filter_opportunities(
     max_risk=0.5,
     max_rounds=5,
     position_size=1000,
+    require_forecast=False,
 ):
     """
     Filter and rank opportunities by:
@@ -109,6 +120,7 @@ def filter_opportunities(
     pass_count_by_round = {r: 0 for r in range(1, max_rounds+1)}
     reject_counts = {
         'funding': 0,
+        'forecast': 0,
         'risk': 0,
         'basis': 0,
         'volume': 0,
@@ -122,6 +134,18 @@ def filter_opportunities(
         if funding_rate < min_funding:
             reject_counts['funding'] += 1
             continue
+
+        if require_forecast:
+            forecast = opp.get('funding_forecast')
+            if not forecast or not forecast.get('is_valid'):
+                reject_counts['forecast'] += 1
+                continue
+            if not forecast.get('confidence_pass'):
+                reject_counts['forecast'] += 1
+                continue
+            if not forecast.get('forecast_pass'):
+                reject_counts['forecast'] += 1
+                continue
 
         # Risk prediction (lower is better)
         risk_info = predict_xgb_risk(symbol, funding_rate, opp['max_rate'].get('mark_price', 0), opp['opportunity_score']['overall_score'])
@@ -185,6 +209,7 @@ def filter_opportunities(
             'selected_rounds': selected_rounds,
             'mark_price': mark_price,
             'index_price': index_price,
+            'funding_forecast': opp.get('funding_forecast'),
         })
 
     # Sort by: net_profit (desc), risk (asc), then quality tie-breakers.
@@ -200,6 +225,6 @@ def filter_opportunities(
     )
 
     print("[FILTER] Reject summary:", reject_counts)
-    for r in range(1, max_rounds+1):
-        print(f"  รอบที่ {r} (net_profit > 0): {pass_count_by_round[r]} symbols")
+    # for r in range(1, max_rounds+1):
+    #     print(f"  รอบที่ {r} (net_profit > 0): {pass_count_by_round[r]} symbols")
     return filtered

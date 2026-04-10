@@ -56,6 +56,9 @@ while true; do
         echo "[$(date +'%Y-%m-%d %H:%M:%S')] ⚠️  Run failed with exit code ${exit_code}; retrying in 60 seconds"
     fi
 
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] ⏳ Sleeping for 60 seconds..."
-    sleep 60
+    sleep_seconds=$(( 60 - 10#$(date +%S) ))
+    [ "$sleep_seconds" -le 0 ] && sleep_seconds=1
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] ⏳ Sleeping for ${sleep_seconds}s (next run at :$(date -v +"${sleep_seconds}S" +'%M:%S'))..."
+    echo "============================================================="
+    sleep "$sleep_seconds"
 done

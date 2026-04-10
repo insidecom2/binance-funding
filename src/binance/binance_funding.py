@@ -21,6 +21,10 @@ import requests
 import time
 from typing import Optional, Dict, Any, List
 import logging
+import hmac
+import hashlib
+from urllib.parse import urlencode
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

@@ -1,4 +1,6 @@
 import logging
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from src.binance import BinanceFunding
 from src.xgb import predict_xgb_risk, predict_multi_round_sustainability, calculate_net_profit_with_fees, get_optimal_timing
@@ -142,7 +144,154 @@ def get_symbol_risk_level(symbol: str) -> tuple:
     """Simple placeholder - replaced by XGB prediction"""
     return ('🤖', 'ML')
 
-def get_all_current_funding_opportunities():
+
+def _compute_linear_forecast(rates):
+    """Return slope/intercept/r2/residual_std and one-step-ahead forecast for a numeric rate series."""
+    n = len(rates)
+    if n < 2:
+        return None
+
+    xs = list(range(n))
+    mean_x = sum(xs) / n
+    mean_y = sum(rates) / n
+
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx == 0:
+        return None
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, rates))
+
+    slope = sxy / sxx
+    intercept = mean_y - slope * mean_x
+
+    fitted = [slope * x + intercept for x in xs]
+    ss_res = sum((y - y_hat) ** 2 for y, y_hat in zip(rates, fitted))
+    ss_tot = sum((y - mean_y) ** 2 for y in rates)
+    r_squared = 1.0 if ss_tot == 0 else max(0.0, min(1.0, 1 - (ss_res / ss_tot)))
+    residual_std = math.sqrt(ss_res / n) if n > 0 else float('inf')
+
+    current_rate = rates[-1]
+    predicted_next = slope * n + intercept
+
+    return {
+        'slope': slope,
+        'intercept': intercept,
+        'r_squared': r_squared,
+        'residual_std': residual_std,
+        'current_rate': current_rate,
+        'predicted_next': predicted_next,
+        'delta_next_vs_current': predicted_next - current_rate,
+        'points_used': n,
+    }
+
+
+def get_next_funding_forecast(
+    symbol,
+    periods=20,
+    prediction_edge=0.0,
+    min_points=8,
+    min_r2=0.20,
+    max_residual_std=0.0004,
+    max_relative_std=0.5,
+    min_predicted_next=0.0002,
+):
+    """Forecast next funding period from recent history with confidence guards."""
+    try:
+        with BinanceFunding() as client:
+            history = client.get_funding_rate(symbol, limit=periods)
+    except Exception as e:
+        return {
+            'is_valid': False,
+            'forecast_pass': False,
+            'confidence_pass': False,
+            'fail_reason': f'fetch_error: {e}',
+            'points_used': 0,
+        }
+
+    if not history:
+        return {
+            'is_valid': False,
+            'forecast_pass': False,
+            'confidence_pass': False,
+            'fail_reason': 'insufficient_points',
+            'points_used': 0,
+        }
+
+    parsed = []
+    for record in history:
+        try:
+            parsed.append((int(record['fundingTime']), float(record['fundingRate'])))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if len(parsed) < min_points:
+        return {
+            'is_valid': False,
+            'forecast_pass': False,
+            'confidence_pass': False,
+            'fail_reason': 'insufficient_points',
+            'points_used': len(parsed),
+        }
+
+    parsed.sort(key=lambda x: x[0])
+    parsed = parsed[-periods:]
+    rates = [rate for _, rate in parsed]
+
+    forecast = _compute_linear_forecast(rates)
+    if forecast is None:
+        return {
+            'is_valid': False,
+            'forecast_pass': False,
+            'confidence_pass': False,
+            'fail_reason': 'regression_error',
+            'points_used': len(rates),
+        }
+
+    mean_rate = sum(rates) / len(rates)
+    relative_std = forecast['residual_std'] / abs(mean_rate) if abs(mean_rate) > 1e-10 else float('inf')
+
+    confidence_pass = (
+        forecast['points_used'] >= min_points
+        and forecast['r_squared'] >= min_r2
+        and forecast['residual_std'] <= max_residual_std
+        and relative_std <= max_relative_std
+    )
+    forecast_pass = (
+        forecast['predicted_next'] >= (forecast['current_rate'] + prediction_edge)
+        and forecast['predicted_next'] >= min_predicted_next
+    )
+
+    fail_reason = None
+    if not confidence_pass:
+        if relative_std > max_relative_std:
+            fail_reason = 'noisy_signal'
+        else:
+            fail_reason = 'low_confidence'
+    elif not forecast_pass:
+        if forecast['predicted_next'] < min_predicted_next:
+            fail_reason = 'predicted_below_floor'
+        else:
+            fail_reason = 'predicted_below_edge'
+
+    return {
+        'is_valid': True,
+        'forecast_pass': forecast_pass,
+        'confidence_pass': confidence_pass,
+        'fail_reason': fail_reason,
+        'periods': periods,
+        'prediction_edge': prediction_edge,
+        'mean_rate': mean_rate,
+        'relative_std': relative_std,
+        **forecast,
+    }
+
+def get_all_current_funding_opportunities(
+    compute_forecast=False,
+    forecast_periods=20,
+    prediction_edge=0.0,
+    forecast_min_points=8,
+    forecast_min_r2=0.20,
+    forecast_max_residual_std=0.0004,
+):
     """Get current live funding rates for ALL symbols at once (faster)"""
     opportunities = []
     try:
@@ -154,6 +303,16 @@ def get_all_current_funding_opportunities():
                     continue
                 try:
                     current_rate = float(data['lastFundingRate'])
+                    funding_forecast = None
+                    if compute_forecast:
+                        funding_forecast = get_next_funding_forecast(
+                            symbol,
+                            periods=forecast_periods,
+                            prediction_edge=prediction_edge,
+                            min_points=forecast_min_points,
+                            min_r2=forecast_min_r2,
+                            max_residual_std=forecast_max_residual_std,
+                        )
                     opportunity = {
                         'symbol': symbol,
                         'max_rate': {
@@ -167,6 +326,7 @@ def get_all_current_funding_opportunities():
                             'opportunity_type': 'SHORT_OPPORTUNITY' if current_rate > 0 else 'LONG_OPPORTUNITY',
                             'signal_strength': 'STRONG' if abs(current_rate) > 0.01 else 'MODERATE' if abs(current_rate) > 0.005 else 'WEAK'
                         },
+                        'funding_forecast': funding_forecast,
                         'next_funding_time': int(data['nextFundingTime']),
                         'is_live': True
                     }
@@ -177,4 +337,60 @@ def get_all_current_funding_opportunities():
     except Exception as e:
         logger.error(f"Failed to get funding data: {e}")
         return []
+    return opportunities
+
+
+def enrich_opportunities_with_forecast(
+    opportunities,
+    forecast_periods=20,
+    prediction_edge=0.0,
+    forecast_min_points=8,
+    forecast_min_r2=0.20,
+    forecast_max_residual_std=0.0004,
+    forecast_max_relative_std=0.5,
+    forecast_min_predicted=0.0002,
+    max_workers=5,
+):
+    """Populate funding_forecast for each provided opportunity in parallel."""
+    if not opportunities:
+        return opportunities
+
+    def _compute_for_opp(opp):
+        symbol = opp.get('symbol', '')
+        if not symbol:
+            return opp, {
+                'is_valid': False,
+                'forecast_pass': False,
+                'confidence_pass': False,
+                'fail_reason': 'missing_symbol',
+                'points_used': 0,
+            }
+        forecast = get_next_funding_forecast(
+            symbol,
+            periods=forecast_periods,
+            prediction_edge=prediction_edge,
+            min_points=forecast_min_points,
+            min_r2=forecast_min_r2,
+            max_residual_std=forecast_max_residual_std,
+            max_relative_std=forecast_max_relative_std,
+            min_predicted_next=forecast_min_predicted,
+        )
+        return opp, forecast
+
+    workers = max(1, min(max_workers, len(opportunities)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(_compute_for_opp, opp): opp for opp in opportunities}
+        for future in as_completed(future_map):
+            opp = future_map[future]
+            try:
+                resolved_opp, forecast = future.result()
+                resolved_opp['funding_forecast'] = forecast
+            except Exception as e:
+                opp['funding_forecast'] = {
+                    'is_valid': False,
+                    'forecast_pass': False,
+                    'confidence_pass': False,
+                    'fail_reason': f'forecast_enrich_error: {e}',
+                    'points_used': 0,
+                }
     return opportunities
