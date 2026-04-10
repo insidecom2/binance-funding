@@ -8,4 +8,4 @@ docker compose down
 docker compose up -d --build
 
 # ดู log
-docker compose logs -f binance-funding
+docker compose logs binance-funding
