@@ -1,8 +1,8 @@
+.venv/
 __pycache__/
 *.py[cod]
 *.so
 .Python
-.venv/
 venv/
 env/
 .python-version
@@ -16,6 +16,8 @@ build/
 *.egg-info/
 .vscode/
 .DS_Store
-.env
-config.yaml
+.git/
+feature/
+*.md
+.env.profile.*
 .telegram_notify_cache.json

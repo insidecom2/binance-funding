@@ -1,0 +1,14 @@
+services:
+  binance-funding:
+    build: .
+    container_name: binance-funding
+    restart: always
+    env_file: .env
+    volumes:
+      # Persist Telegram notify cooldown cache across container restarts
+      - ./.telegram_notify_cache.json:/app/.telegram_notify_cache.json
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: '10m'
+        max-file: '5'
