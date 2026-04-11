@@ -1,0 +1,29 @@
+
+name: Develop Python App with docker
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: Crontabo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Login Crontabo
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USERNAME }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          script: |
+            git checkout master
+            cd app/binance-funding
+            ./deploy.sh
