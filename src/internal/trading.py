@@ -1,3 +1,70 @@
+class TradeOrchestrator:
+    """
+    Manages automated futures-short + spot-long balance trading
+    """
+
+    def __init__(self, binance_client, config: Dict[str, Any]):
+        """
+        Initialize trade orchestrator
+        Args:
+            binance_client: BinanceFunding client with trading methods
+            config: Trading configuration dict with keys:
+                - position_size (float): USD value per trade
+                - leverage (float): Leverage ratio (1.0 for no leverage)
+                - hedge_ratio (float): Ratio for shorts vs longs (0.5 = 50-50)
+                - stop_loss_pct (float): Stop loss percentage (e.g., -0.02 for -2%)
+                - exit_basis_threshold (float): Basis below which to exit
+                - order_type (str): 'LIMIT' or 'MARKET'
+                - trade_history_path (str): Path to persist trade history
+        """
+        self.client = binance_client
+        self.config = config
+        self.trade_history_path = config.get('trade_history_path', '.trade_history.json')
+        self.mysql_trades_enabled = bool(config.get('mysql_trades_enabled', False))
+        self.mysql_trade_config = {
+            'host': config.get('mysql_host', '127.0.0.1'),
+            'port': int(config.get('mysql_port', 3306)),
+            'user': config.get('mysql_user', ''),
+            'password': config.get('mysql_password', ''),
+            'database': config.get('mysql_database', ''),
+            'table_name': config.get('mysql_table_trade_history', 'trade_history'),
+        }
+        self.active_trades = {}  # symbol -> trade info dict
+        self.monitoring = False
+        self.monitor_thread = None
+
+    def get_unrealized_pnl(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Compute unrealized PnL for all or a specific open trade.
+        Returns a dict: {symbol: {'unrealized_pnl': float, 'entry_price': float, 'current_price': float, ...}}
+        """
+        results = {}
+        symbols = [symbol] if symbol else list(self.active_trades.keys())
+        for sym in symbols:
+            trade = self.active_trades.get(sym)
+            if not trade:
+                continue
+            position = trade['position']
+            entry_price = position.get('entry_price')
+            futures_qty = position.get('futures_qty')
+            # Get current mark price
+            try:
+                premium = self.client.get_premium_index(sym)
+                if premium:
+                    current_price = float(premium[0].get('markPrice', entry_price))
+                else:
+                    current_price = entry_price
+            except Exception:
+                current_price = entry_price
+            # Unrealized PnL (futures leg only, before fees)
+            unrealized_pnl = (entry_price - current_price) * futures_qty
+            results[sym] = {
+                'unrealized_pnl': unrealized_pnl,
+                'entry_price': entry_price,
+                'current_price': current_price,
+                'futures_qty': futures_qty
+            }
+        return results
 """
 Trading Orchestration Module
 =============================
@@ -131,6 +198,37 @@ class TradeOrchestrator:
             'spot_order_id': None,
             'error': None
         }
+
+        # --- PHASE 4: Pre-trade balance checks ---
+        try:
+            # Calculate required notional for each leg
+            position_size = self.config['position_size']
+            leverage = self.config['leverage']
+            hedge_ratio = self.config['hedge_ratio']
+            total_notional = position_size * leverage
+            short_notional = total_notional * hedge_ratio
+            long_notional = total_notional * hedge_ratio
+
+            # Check spot balance (quote asset, e.g., USDT)
+            spot_balance = self.client.get_spot_balance(symbol)
+            if spot_balance is not None and spot_balance < long_notional:
+                logger.warning(f"Insufficient spot balance for {symbol}: required={long_notional}, available={spot_balance}")
+                result['error'] = f"Insufficient spot balance: required={long_notional}, available={spot_balance}"
+                self._save_trade_history(result)
+                return result
+
+            # Check futures margin balance (quote asset, e.g., USDT)
+            futures_balance = self.client.get_futures_margin_balance(symbol)
+            if futures_balance is not None and futures_balance < short_notional:
+                logger.warning(f"Insufficient futures margin for {symbol}: required={short_notional}, available={futures_balance}")
+                result['error'] = f"Insufficient futures margin: required={short_notional}, available={futures_balance}"
+                self._save_trade_history(result)
+                return result
+        except Exception as e:
+            logger.error(f"Pre-trade balance check failed: {str(e)}")
+            result['error'] = f"Pre-trade balance check failed: {str(e)}"
+            self._save_trade_history(result)
+            return result
         
         try:
             # Calculate position sizes
@@ -574,11 +672,32 @@ class TradeOrchestrator:
             
             # Calculate P&L (rough estimate from entry/exit prices)
             exit_price = float(futures_close.get('avgPrice', 0)) or position['entry_price']
-            pnl = (position['entry_price'] - exit_price) * position['futures_qty']
+            raw_pnl = (position['entry_price'] - exit_price) * position['futures_qty']
+
+            # --- Fee Calculation ---
+            # Use config or default fee rates (e.g., 0.04% per trade)
+            fee_rate_futures = self.config.get('fee_rate_futures', 0.0004)  # 0.04%
+            fee_rate_spot = self.config.get('fee_rate_spot', 0.0004)        # 0.04%
+
+            # Fees are charged on notional value of each leg (entry + exit)
+            notional_futures = abs(position['entry_price'] * position['futures_qty'])
+            notional_spot = abs(position['entry_price'] * position['spot_qty'])
+            # For closing, use exit price for both legs
+            notional_futures_exit = abs(exit_price * position['futures_qty'])
+            notional_spot_exit = abs(exit_price * position['spot_qty'])
+
+            fee_futures = (notional_futures + notional_futures_exit) * fee_rate_futures
+            fee_spot = (notional_spot + notional_spot_exit) * fee_rate_spot
+            fee_total = fee_futures + fee_spot
+
+            pnl = raw_pnl - fee_total
             result['pnl'] = pnl
-            
-            logger.info(f"   ✅ Position closed. P&L: ${pnl:.2f}")
-            
+            result['fee_futures'] = fee_futures
+            result['fee_spot'] = fee_spot
+            result['fee_total'] = fee_total
+
+            logger.info(f"   ✅ Position closed. P&L: ${pnl:.2f} (raw: ${raw_pnl:.2f}, fees: ${fee_total:.2f})")
+
             self._save_trade_history(result)
             return result
             
