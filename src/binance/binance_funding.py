@@ -39,6 +39,7 @@ class BinanceFundingError(Exception):
 class BinanceFunding:
 
     BASE_URL = "https://fapi.binance.com"
+    SPOT_BASE_URL = "https://api.binance.com"
 
     def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100, start_time: Optional[int] = None, end_time: Optional[int] = None) -> list:
         """
@@ -76,6 +77,134 @@ class BinanceFunding:
         self.timeout = timeout
         self.retries = retries
         self.session = requests.Session()
+        self.api_key = os.getenv("BINANCE_API_KEY", "").strip()
+        self.secret_key = os.getenv("BINANCE_SECRET_KEY", "").strip()
+        self.recv_window = int(os.getenv("BINANCE_RECV_WINDOW", "5000"))
+        self.exchange_info_ttl_seconds = int(os.getenv("BINANCE_EXCHANGE_INFO_TTL", "300"))
+        self._exchange_info_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _ensure_credentials(self) -> None:
+        """Ensure API key and secret key are available for signed endpoints."""
+        if not self.api_key or not self.secret_key:
+            raise BinanceFundingError(
+                "Missing Binance trading credentials. Set BINANCE_API_KEY and BINANCE_SECRET_KEY."
+            )
+
+    def _sign_request(self, params: Dict[str, Any]) -> str:
+        """Create Binance HMAC SHA256 signature from request params."""
+        encoded = urlencode(params, doseq=True)
+        return hmac.new(
+            self.secret_key.encode("utf-8"),
+            encoded.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _raise_mapped_api_error(self, response: requests.Response) -> None:
+        """Raise BinanceFundingError with mapped details from HTTP/API response."""
+        status = response.status_code
+        default_msg = response.text.strip() or "Unknown Binance API error"
+
+        code = "HTTP_ERROR"
+        message = default_msg
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                code = payload.get("code", code)
+                message = payload.get("msg", message)
+        except ValueError:
+            pass
+
+        hints = {
+            400: "Bad request or invalid order parameters",
+            401: "Unauthorized API key or signature",
+            403: "Forbidden or restricted IP permissions",
+            418: "IP auto-banned due to rate limit violations",
+            429: "Rate limit exceeded",
+        }
+        hint = hints.get(status, "Binance API request failed")
+        raise BinanceFundingError(f"{hint} (status={status}, code={code}): {message}")
+
+    def _request(
+        self,
+        endpoint: str,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        signed: bool = False,
+        use_spot: bool = False,
+    ) -> Any:
+        """Execute HTTP request with retries for both public and signed Binance endpoints."""
+        method = method.upper()
+        params = dict(params or {})
+        base_url = self.SPOT_BASE_URL if use_spot else self.BASE_URL
+        url = f"{base_url}{endpoint}"
+
+        headers = {
+            "User-Agent": "Binance-Funding-Client/1.0",
+        }
+
+        if signed:
+            self._ensure_credentials()
+            params["timestamp"] = int(time.time() * 1000)
+            params.setdefault("recvWindow", self.recv_window)
+            params["signature"] = self._sign_request(params)
+            headers["X-MBX-APIKEY"] = self.api_key
+
+        for attempt in range(self.retries):
+            try:
+                logger.info(f"Requesting {url} (attempt {attempt + 1})")
+
+                request_args: Dict[str, Any] = {
+                    "method": method,
+                    "url": url,
+                    "timeout": self.timeout,
+                    "headers": headers,
+                }
+                if method == "GET":
+                    request_args["params"] = params
+                else:
+                    request_args["data"] = params
+
+                response = self.session.request(**request_args)
+
+                if response.status_code >= 400:
+                    if response.status_code in {418, 429, 500, 502, 503, 504} and attempt < self.retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.warning(
+                            "HTTP %s from %s (attempt %s). Retrying in %ss",
+                            response.status_code,
+                            endpoint,
+                            attempt + 1,
+                            wait_time,
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    self._raise_mapped_api_error(response)
+
+                data = response.json()
+                logger.info(f"Successfully fetched data from {endpoint}")
+                return data
+
+            except requests.exceptions.Timeout as e:
+                if attempt == self.retries - 1:
+                    raise BinanceFundingError(f"Request timeout after {self.retries} attempts: {str(e)}")
+                wait_time = 2 ** attempt
+                logger.warning("Timeout on %s (attempt %s). Retrying in %ss", endpoint, attempt + 1, wait_time)
+                time.sleep(wait_time)
+            except requests.exceptions.ConnectionError as e:
+                if attempt == self.retries - 1:
+                    raise BinanceFundingError(f"Connection error after {self.retries} attempts: {str(e)}")
+                wait_time = 2 ** attempt
+                logger.warning("Connection error on %s (attempt %s). Retrying in %ss", endpoint, attempt + 1, wait_time)
+                time.sleep(wait_time)
+            except requests.exceptions.RequestException as e:
+                if attempt == self.retries - 1:
+                    raise BinanceFundingError(f"Failed to fetch data after {self.retries} attempts: {str(e)}")
+                wait_time = 2 ** attempt
+                logger.warning("Request failed on %s (attempt %s). Retrying in %ss", endpoint, attempt + 1, wait_time)
+                time.sleep(wait_time)
+            except ValueError as e:
+                raise BinanceFundingError(f"Invalid JSON response from Binance API: {str(e)}")
         
     def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -91,38 +220,207 @@ class BinanceFunding:
         Raises:
             BinanceFundingError: If request fails after all retries
         """
-        url = f"{self.BASE_URL}{endpoint}"
-        
-        for attempt in range(self.retries):
-            try:
-                logger.info(f"Requesting {url} (attempt {attempt + 1})")
-                
-                response = self.session.get(
-                    url, 
-                    params=params, 
-                    timeout=self.timeout,
-                    headers={
-                        'User-Agent': 'Binance-Funding-Client/1.0'
-                    }
-                )
-                
-                # Check if request was successful
-                response.raise_for_status()
-                
-                data = response.json()
-                logger.info(f"Successfully fetched data from {endpoint}")
-                return data
-                
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Request failed (attempt {attempt + 1}): {str(e)}")
-                
-                if attempt == self.retries - 1:  # Last attempt
-                    raise BinanceFundingError(f"Failed to fetch data after {self.retries} attempts: {str(e)}")
-                
-                # Wait before retry (exponential backoff)
-                wait_time = 2 ** attempt
-                logger.info(f"Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
+        return self._request(endpoint=endpoint, method="GET", params=params, signed=False, use_spot=False)
+
+    def _make_authenticated_request(
+        self,
+        endpoint: str,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        use_spot: bool = False,
+    ) -> Any:
+        """Make signed request to Binance API with API key header and signature."""
+        return self._request(endpoint=endpoint, method=method, params=params, signed=True, use_spot=use_spot)
+
+    def place_futures_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        order_type: str = "MARKET",
+        price: Optional[float] = None,
+        reduce_only: bool = False,
+        time_in_force: str = "GTC",
+        **extra_params: Any,
+    ) -> Dict[str, Any]:
+        """Create a futures order on Binance USD-M futures."""
+        params: Dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "side": side.upper(),
+            "type": order_type.upper(),
+            "quantity": quantity,
+        }
+        if params["type"] == "LIMIT":
+            if price is None:
+                raise BinanceFundingError("price is required for LIMIT futures orders")
+            params["price"] = price
+            params["timeInForce"] = time_in_force
+        if reduce_only:
+            params["reduceOnly"] = "true"
+
+        params.update(extra_params)
+        return self._make_authenticated_request("/fapi/v1/order", method="POST", params=params, use_spot=False)
+
+    def place_spot_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        order_type: str = "MARKET",
+        price: Optional[float] = None,
+        time_in_force: str = "GTC",
+        **extra_params: Any,
+    ) -> Dict[str, Any]:
+        """Create a spot order on Binance spot market."""
+        params: Dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "side": side.upper(),
+            "type": order_type.upper(),
+            "quantity": quantity,
+        }
+        if params["type"] == "LIMIT":
+            if price is None:
+                raise BinanceFundingError("price is required for LIMIT spot orders")
+            params["price"] = price
+            params["timeInForce"] = time_in_force
+
+        params.update(extra_params)
+        return self._make_authenticated_request("/api/v3/order", method="POST", params=params, use_spot=True)
+
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[str] = None,
+        *,
+        is_futures: bool = True,
+        orig_client_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cancel an order by order ID or client order ID in futures or spot market."""
+        if not order_id and not orig_client_order_id:
+            raise BinanceFundingError("Either order_id or orig_client_order_id is required for cancellation")
+
+        params: Dict[str, Any] = {"symbol": symbol.upper()}
+        if order_id:
+            params["orderId"] = order_id
+        if orig_client_order_id:
+            params["origClientOrderId"] = orig_client_order_id
+
+        endpoint = "/fapi/v1/order" if is_futures else "/api/v3/order"
+        return self._make_authenticated_request(endpoint, method="DELETE", params=params, use_spot=not is_futures)
+
+    def get_order(
+        self,
+        symbol: str,
+        *,
+        order_id: Optional[str] = None,
+        is_futures: bool = True,
+        orig_client_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Query a futures or spot order."""
+        if not order_id and not orig_client_order_id:
+            raise BinanceFundingError("Either order_id or orig_client_order_id is required for order query")
+
+        params: Dict[str, Any] = {"symbol": symbol.upper()}
+        if order_id:
+            params["orderId"] = order_id
+        if orig_client_order_id:
+            params["origClientOrderId"] = orig_client_order_id
+
+        endpoint = "/fapi/v1/order" if is_futures else "/api/v3/order"
+        return self._make_authenticated_request(endpoint, method="GET", params=params, use_spot=not is_futures)
+
+    def get_account_balance(self, *, is_futures: bool = True, asset: Optional[str] = None) -> Any:
+        """Get account balances for futures or spot account."""
+        if is_futures:
+            balances = self._make_authenticated_request("/fapi/v2/balance", method="GET", params={}, use_spot=False)
+            if asset:
+                asset = asset.upper()
+                return [b for b in balances if str(b.get("asset", "")).upper() == asset]
+            return balances
+
+        account = self._make_authenticated_request("/api/v3/account", method="GET", params={}, use_spot=True)
+        if asset:
+            asset = asset.upper()
+            balances = account.get("balances", [])
+            return [b for b in balances if str(b.get("asset", "")).upper() == asset]
+        return account
+
+    def get_exchange_info(self, *, is_futures: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
+        """Get exchange metadata (symbol filters, precision rules) for futures or spot."""
+        cache_key = "futures" if is_futures else "spot"
+        now = time.time()
+
+        if not force_refresh:
+            cached = self._exchange_info_cache.get(cache_key)
+            if cached and (now - cached.get("updated_at", 0)) < self.exchange_info_ttl_seconds:
+                return cached["payload"]
+
+        endpoint = "/fapi/v1/exchangeInfo" if is_futures else "/api/v3/exchangeInfo"
+        payload = self._request(endpoint=endpoint, method="GET", params={}, signed=False, use_spot=not is_futures)
+        self._exchange_info_cache[cache_key] = {
+            "payload": payload,
+            "updated_at": now,
+        }
+        return payload
+
+    def get_symbol_filters(self, symbol: str, *, is_futures: bool = True, force_refresh: bool = False) -> Dict[str, Any]:
+        """Return normalized sizing filters for a symbol from exchange info."""
+        symbol = symbol.upper()
+        exchange_info = self.get_exchange_info(is_futures=is_futures, force_refresh=force_refresh)
+        symbols = exchange_info.get("symbols", []) if isinstance(exchange_info, dict) else []
+
+        symbol_info = None
+        for item in symbols:
+            if str(item.get("symbol", "")).upper() == symbol:
+                symbol_info = item
+                break
+
+        if not symbol_info:
+            market_name = "futures" if is_futures else "spot"
+            raise BinanceFundingError(f"Symbol {symbol} not found in {market_name} exchange info")
+
+        filters_by_type = {
+            f.get("filterType"): f
+            for f in symbol_info.get("filters", [])
+            if isinstance(f, dict) and f.get("filterType")
+        }
+
+        lot_size = filters_by_type.get("LOT_SIZE", {})
+        market_lot_size = filters_by_type.get("MARKET_LOT_SIZE", {})
+        price_filter = filters_by_type.get("PRICE_FILTER", {})
+        notional_filter = filters_by_type.get("NOTIONAL") or filters_by_type.get("MIN_NOTIONAL") or {}
+
+        min_notional = notional_filter.get("minNotional")
+        if min_notional is None:
+            min_notional = notional_filter.get("notional")
+
+        return {
+            "symbol": symbol,
+            "market": "futures" if is_futures else "spot",
+            "step_size": lot_size.get("stepSize"),
+            "market_step_size": market_lot_size.get("stepSize") or lot_size.get("stepSize"),
+            "tick_size": price_filter.get("tickSize"),
+            "min_qty": lot_size.get("minQty"),
+            "market_min_qty": market_lot_size.get("minQty") or lot_size.get("minQty"),
+            "min_notional": min_notional,
+            "max_qty": lot_size.get("maxQty"),
+            "max_price": price_filter.get("maxPrice"),
+            "min_price": price_filter.get("minPrice"),
+            "raw": symbol_info,
+        }
+
+    def get_position_info(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get futures position information, optionally filtered by symbol."""
+        params: Dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol.upper()
+
+        positions = self._make_authenticated_request("/fapi/v2/positionRisk", method="GET", params=params, use_spot=False)
+        if symbol and isinstance(positions, list):
+            symbol = symbol.upper()
+            return [p for p in positions if str(p.get("symbol", "")).upper() == symbol]
+        return positions if isinstance(positions, list) else [positions]
     
     def get_funding_rate(self, symbol: str, start_time: Optional[int] = None, 
                         end_time: Optional[int] = None, limit: int = 100) -> List[Dict[str, Any]]:

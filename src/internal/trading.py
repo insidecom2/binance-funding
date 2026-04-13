@@ -20,6 +20,10 @@ from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 from threading import Thread
 import os
+from uuid import uuid4
+
+from src.internal.mysql_logger import insert_trade_history_row
+from src.internal.symbol_rules import validate_order_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +56,30 @@ class TradeOrchestrator:
         self.client = binance_client
         self.config = config
         self.trade_history_path = config.get('trade_history_path', '.trade_history.json')
+        self.mysql_trades_enabled = bool(config.get('mysql_trades_enabled', False))
+        self.mysql_trade_config = {
+            'host': config.get('mysql_host', '127.0.0.1'),
+            'port': int(config.get('mysql_port', 3306)),
+            'user': config.get('mysql_user', ''),
+            'password': config.get('mysql_password', ''),
+            'database': config.get('mysql_database', ''),
+            'table_name': config.get('mysql_table_trade_history', 'trade_history'),
+        }
         self.active_trades = {}  # symbol -> trade info dict
         self.monitoring = False
         self.monitor_thread = None
+
+    def _resolve_validation_price(self, symbol: str, fallback_price: float) -> float:
+        """Get a fresh mark price for sizing checks, fallback to provided price."""
+        try:
+            premium = self.client.get_premium_index(symbol)
+            if premium:
+                mark = float(premium[0].get('markPrice', fallback_price))
+                if mark > 0:
+                    return mark
+        except Exception as exc:
+            logger.debug("Failed to refresh mark price for %s: %s", symbol, exc)
+        return fallback_price
         
     def execute_spot_futures_trade(self, opportunity: Dict[str, Any], 
                                   dry_run: bool = True) -> Dict[str, Any]:
@@ -85,15 +110,22 @@ class TradeOrchestrator:
         """
         symbol = opportunity['symbol']
         mark_price = float(opportunity['mark_price'])
+        trade_group_id = uuid4().hex
         
         logger.info(f"🟢 Starting trade execution for {symbol} (dry_run={dry_run})")
         logger.info(f"   Funding: {opportunity['funding_rate']:.6f}, Basis: {opportunity['basis']:.4f}%")
         logger.info(f"   Predicted next: {opportunity.get('predicted_next', 'N/A')}")
         
         result = {
+            'trade_group_id': trade_group_id,
             'symbol': symbol,
             'entry_time': datetime.now().isoformat(),
             'entry_price': mark_price,
+            'dry_run': dry_run,
+            'order_type': self.config.get('order_type', 'LIMIT'),
+            'funding_rate': opportunity.get('funding_rate'),
+            'basis': opportunity.get('basis'),
+            'risk': opportunity.get('risk'),
             'success': False,
             'futures_order_id': None,
             'spot_order_id': None,
@@ -105,11 +137,73 @@ class TradeOrchestrator:
             futures_qty, spot_qty, expected_pnl = self._calculate_position_sizes(
                 symbol, mark_price, opportunity['basis']
             )
+
+            order_type = self.config.get('order_type', 'LIMIT')
+            futures_filters = self.client.get_symbol_filters(symbol, is_futures=True)
+            spot_filters = self.client.get_symbol_filters(symbol, is_futures=False)
+
+            futures_validation = validate_order_inputs(
+                symbol=symbol,
+                market='futures',
+                side='SELL',
+                quantity=futures_qty,
+                price=mark_price,
+                filters=futures_filters,
+                order_type=order_type,
+            )
+            if not futures_validation['ok']:
+                reason = futures_validation['reason']
+                logger.warning(
+                    "Rejected %s futures entry sizing: %s | raw_qty=%.12f rounded_qty=%s price=%s notional=%.8f min_qty=%s min_notional=%s",
+                    symbol,
+                    reason,
+                    futures_validation['raw_quantity'],
+                    futures_validation['quantity_str'],
+                    futures_validation['price_str'],
+                    futures_validation['notional'],
+                    futures_validation['required']['min_qty'],
+                    futures_validation['required']['min_notional'],
+                )
+                result['error'] = f"Futures sizing rejected: {reason}"
+                self._save_trade_history(result)
+                return result
+
+            spot_validation = validate_order_inputs(
+                symbol=symbol,
+                market='spot',
+                side='BUY',
+                quantity=spot_qty,
+                price=mark_price,
+                filters=spot_filters,
+                order_type=order_type,
+            )
+            if not spot_validation['ok']:
+                reason = spot_validation['reason']
+                logger.warning(
+                    "Rejected %s spot entry sizing: %s | raw_qty=%.12f rounded_qty=%s price=%s notional=%.8f min_qty=%s min_notional=%s",
+                    symbol,
+                    reason,
+                    spot_validation['raw_quantity'],
+                    spot_validation['quantity_str'],
+                    spot_validation['price_str'],
+                    spot_validation['notional'],
+                    spot_validation['required']['min_qty'],
+                    spot_validation['required']['min_notional'],
+                )
+                result['error'] = f"Spot sizing rejected: {reason}"
+                self._save_trade_history(result)
+                return result
+
+            futures_qty = futures_validation['quantity']
+            spot_qty = spot_validation['quantity']
+            futures_price = futures_validation['price']
+            spot_price = spot_validation['price']
             
             result['futures_qty'] = futures_qty
             result['spot_qty'] = spot_qty
             result['expected_pnl'] = expected_pnl
             result['position_size'] = self.config['position_size']
+            result['entry_price'] = futures_price
             
             logger.info(f"   Position sizing: futures_qty={futures_qty:.8f}, spot_qty={spot_qty:.8f}")
             logger.info(f"   Expected P&L (1 period): ${expected_pnl:.2f}")
@@ -123,8 +217,8 @@ class TradeOrchestrator:
                 return result
             
             # Place parallel orders: futures SELL (short) + spot BUY (long)
-            futures_result = self._place_futures_short(symbol, futures_qty, mark_price)
-            spot_result = self._place_spot_long(symbol, spot_qty, mark_price)
+            futures_result = self._place_futures_short(symbol, futures_qty, futures_price)
+            spot_result = self._place_spot_long(symbol, spot_qty, spot_price)
             
             if not futures_result['success'] or not spot_result['success']:
                 logger.error(f"   ❌ Order placement failed - rolling back")
@@ -145,24 +239,26 @@ class TradeOrchestrator:
             
             # Store active trade for monitoring
             self.active_trades[symbol] = {
+                'trade_group_id': trade_group_id,
                 'opportunity': opportunity,
                 'position': {
                     'futures_qty': futures_qty,
                     'spot_qty': spot_qty,
-                    'entry_price': mark_price,
-                    'futures_entry_price': futures_result.get('fill_price', mark_price),
-                    'spot_entry_price': spot_result.get('fill_price', mark_price)
+                        'entry_price': futures_price,
+                        'futures_entry_price': futures_result.get('fill_price', futures_price),
+                        'spot_entry_price': spot_result.get('fill_price', spot_price)
                 },
                 'order_ids': {
                     'futures': futures_result.get('order_id'),
                     'spot': spot_result.get('order_id')
                 },
-                'entry_time': datetime.now()
+                'entry_time': datetime.now(),
+                'dry_run': dry_run,
             }
             
             logger.info(f"   ✅ Trade executed successfully!")
             logger.info(f"      Futures: short {futures_qty:.8f} @ {futures_result.get('fill_price', mark_price):.2f}")
-            logger.info(f"      Spot: long {spot_qty:.8f} @ {spot_result.get('fill_price', mark_price):.2f}")
+            logger.info(f"      Spot: long {spot_qty:.8f} @ {spot_result.get('fill_price', spot_price):.2f}")
             
             self._save_trade_history(result)
             return result
@@ -381,9 +477,16 @@ class TradeOrchestrator:
             return {'success': False, 'error': 'Trade not found'}
         
         result = {
+            'trade_group_id': trade.get('trade_group_id'),
             'symbol': symbol,
             'exit_reason': exit_reason,
             'exit_time': datetime.now().isoformat(),
+            'entry_time': trade.get('entry_time').isoformat() if isinstance(trade.get('entry_time'), datetime) else None,
+            'dry_run': bool(trade.get('dry_run', False)),
+            'order_type': self.config.get('order_type', 'LIMIT'),
+            'funding_rate': (trade.get('opportunity') or {}).get('funding_rate'),
+            'basis': (trade.get('opportunity') or {}).get('basis'),
+            'risk': (trade.get('opportunity') or {}).get('risk'),
             'success': False,
             'futures_close_id': None,
             'spot_close_id': None,
@@ -393,13 +496,62 @@ class TradeOrchestrator:
         
         try:
             position = trade['position']
+            reference_price = self._resolve_validation_price(symbol, float(position.get('entry_price', 0)))
+            order_type = self.config.get('order_type', 'LIMIT')
+
+            futures_close_validation = validate_order_inputs(
+                symbol=symbol,
+                market='futures',
+                side='BUY',
+                quantity=position['futures_qty'],
+                price=reference_price,
+                filters=self.client.get_symbol_filters(symbol, is_futures=True),
+                order_type=order_type,
+            )
+            if not futures_close_validation['ok']:
+                reason = futures_close_validation['reason']
+                logger.warning(
+                    "Rejected %s futures close sizing: %s | rounded_qty=%s price=%s notional=%.8f",
+                    symbol,
+                    reason,
+                    futures_close_validation['quantity_str'],
+                    futures_close_validation['price_str'],
+                    futures_close_validation['notional'],
+                )
+                result['error'] = f"Futures close sizing rejected: {reason}"
+                self._save_trade_history(result)
+                return result
+
+            spot_close_validation = validate_order_inputs(
+                symbol=symbol,
+                market='spot',
+                side='SELL',
+                quantity=position['spot_qty'],
+                price=reference_price,
+                filters=self.client.get_symbol_filters(symbol, is_futures=False),
+                order_type=order_type,
+            )
+            if not spot_close_validation['ok']:
+                reason = spot_close_validation['reason']
+                logger.warning(
+                    "Rejected %s spot close sizing: %s | rounded_qty=%s price=%s notional=%.8f",
+                    symbol,
+                    reason,
+                    spot_close_validation['quantity_str'],
+                    spot_close_validation['price_str'],
+                    spot_close_validation['notional'],
+                )
+                result['error'] = f"Spot close sizing rejected: {reason}"
+                self._save_trade_history(result)
+                return result
             
             # Close futures short (BUY to close)
             futures_close = self.client.place_futures_order(
                 symbol=symbol,
                 side='BUY',
-                quantity=position['futures_qty'],
+                quantity=futures_close_validation['quantity'],
                 order_type=self.config.get('order_type', 'LIMIT'),
+                price=futures_close_validation['price'] if order_type == 'LIMIT' else None,
                 reduce_only=True
             )
             
@@ -407,13 +559,18 @@ class TradeOrchestrator:
             spot_close = self.client.place_spot_order(
                 symbol=symbol,
                 side='SELL',
-                quantity=position['spot_qty'],
-                order_type=self.config.get('order_type', 'LIMIT')
+                quantity=spot_close_validation['quantity'],
+                order_type=self.config.get('order_type', 'LIMIT'),
+                price=spot_close_validation['price'] if order_type == 'LIMIT' else None,
             )
             
             result['futures_close_id'] = futures_close.get('orderId')
             result['spot_close_id'] = spot_close.get('orderId')
             result['success'] = True
+            result['futures_qty'] = position.get('futures_qty')
+            result['spot_qty'] = position.get('spot_qty')
+            result['position_size'] = self.config.get('position_size')
+            result['entry_price'] = position.get('entry_price')
             
             # Calculate P&L (rough estimate from entry/exit prices)
             exit_price = float(futures_close.get('avgPrice', 0)) or position['entry_price']
@@ -447,6 +604,28 @@ class TradeOrchestrator:
                 json.dump(history, f, indent=2, default=str)
             
             logger.info(f"Trade history saved to {self.trade_history_path}")
+
+            if self.mysql_trades_enabled:
+                user = self.mysql_trade_config.get('user')
+                database = self.mysql_trade_config.get('database')
+                if not user or not database:
+                    logger.warning("MySQL trade logging enabled but user/database not set; skip DB insert")
+                    return
+
+                inserted = insert_trade_history_row(
+                    trade_record=trade_record,
+                    host=self.mysql_trade_config['host'],
+                    port=self.mysql_trade_config['port'],
+                    user=self.mysql_trade_config['user'],
+                    password=self.mysql_trade_config['password'],
+                    database=self.mysql_trade_config['database'],
+                    table_name=self.mysql_trade_config['table_name'],
+                )
+                if inserted:
+                    logger.info(
+                        "Trade history inserted into MySQL table %s",
+                        self.mysql_trade_config['table_name'],
+                    )
         except Exception as e:
             logger.error(f"Failed to save trade history: {str(e)}")
     

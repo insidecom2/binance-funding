@@ -1,0 +1,40 @@
+-- Trade history table fallback for MySQL 5.7
+-- Difference from MySQL 8 migration:
+-- - Uses LONGTEXT instead of JSON for raw_payload compatibility.
+
+CREATE TABLE IF NOT EXISTS `trade_history` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `event_time` DATETIME(6) NOT NULL,
+  `entry_time` DATETIME(6) NULL,
+  `exit_time` DATETIME(6) NULL,
+  `trade_group_id` VARCHAR(64) NULL,
+  `symbol` VARCHAR(32) NOT NULL,
+  `event_type` VARCHAR(16) NOT NULL,
+  `is_dry_run` TINYINT(1) NOT NULL DEFAULT 1,
+  `success` TINYINT(1) NOT NULL DEFAULT 0,
+  `order_type` VARCHAR(16) NULL,
+  `futures_order_id` VARCHAR(128) NULL,
+  `spot_order_id` VARCHAR(128) NULL,
+  `futures_close_id` VARCHAR(128) NULL,
+  `spot_close_id` VARCHAR(128) NULL,
+  `entry_price` DECIMAL(28,10) NULL,
+  `futures_qty` DECIMAL(28,10) NULL,
+  `spot_qty` DECIMAL(28,10) NULL,
+  `position_size` DECIMAL(28,10) NULL,
+  `expected_pnl` DECIMAL(28,10) NULL,
+  `realized_pnl` DECIMAL(28,10) NULL,
+  `funding_rate` DECIMAL(18,10) NULL,
+  `basis` DECIMAL(18,10) NULL,
+  `risk_score` DECIMAL(18,10) NULL,
+  `exit_reason` VARCHAR(255) NULL,
+  `error_message` TEXT NULL,
+  `raw_payload` LONGTEXT NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_trade_history_event_time` (`event_time`),
+  KEY `idx_trade_history_trade_group` (`trade_group_id`),
+  KEY `idx_trade_history_symbol_event_time` (`symbol`, `event_time`),
+  KEY `idx_trade_history_success` (`success`),
+  KEY `idx_trade_history_dryrun` (`is_dry_run`),
+  KEY `idx_trade_history_event_type` (`event_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
