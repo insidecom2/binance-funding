@@ -1,7 +1,62 @@
+from typing import Dict, Any, Optional
+
+
 class TradeOrchestrator:
     """
     Manages automated futures-short + spot-long balance trading
     """
+
+    def _wait_for_order_filled(self, symbol: str, order_id: str, is_futures: bool, timeout: int = 30, poll_interval: float = 1.5) -> Dict[str, Any]:
+        """
+        Poll order status until FILLED, PARTIALLY_FILLED, or timeout. Returns order status dict.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                order = self.client.get_order(symbol, order_id=order_id, is_futures=is_futures)
+                status = order.get('status', '').upper()
+                if status in {'FILLED', 'PARTIALLY_FILLED', 'CANCELED', 'REJECTED', 'EXPIRED'}:
+                    return order
+            except Exception as e:
+                logger.warning(f"Order status poll failed: {e}")
+            time.sleep(poll_interval)
+        # Final fetch after timeout
+        try:
+            order = self.client.get_order(symbol, order_id=order_id, is_futures=is_futures)
+            return order
+        except Exception as e:
+            logger.error(f"Final order status fetch failed: {e}")
+            return {'status': 'UNKNOWN', 'error': str(e)}
+
+    def _retry_order_until_filled(self, place_order_fn, symbol, qty, price, is_futures, max_retries=2, timeout=30, poll_interval=1.5):
+        attempts = 0
+        filled_qty = 0.0
+        order_ids = []
+        while attempts <= max_retries:
+            result = place_order_fn(symbol, qty, price)
+            if not result['success']:
+                logger.error(f"Order attempt {attempts+1} failed: {result.get('error')}")
+                break
+            order_id = result.get('order_id')
+            order_ids.append(order_id)
+            status = self._wait_for_order_filled(symbol, order_id, is_futures, timeout, poll_interval)
+            order_status = status.get('status', '').upper()
+            executed_qty = float(status.get('executedQty', 0) or status.get('executed_quantity', 0) or 0)
+            filled_qty += executed_qty
+            if order_status == 'FILLED':
+                return {'success': True, 'order_ids': order_ids, 'filled_qty': filled_qty, 'status': order_status, 'fill_price': result.get('fill_price', price)}
+            elif order_status == 'PARTIALLY_FILLED':
+                logger.warning(f"Order {order_id} partially filled: {executed_qty}, retrying for remainder...")
+                # Cancel remaining
+                self._cancel_order(symbol, order_id, is_futures)
+                qty -= executed_qty
+                if qty <= 0:
+                    return {'success': True, 'order_ids': order_ids, 'filled_qty': filled_qty, 'status': 'FILLED', 'fill_price': result.get('fill_price', price)}
+            else:
+                logger.error(f"Order {order_id} not filled: {order_status}")
+                break
+            attempts += 1
+        return {'success': False, 'order_ids': order_ids, 'filled_qty': filled_qty, 'status': 'FAILED'}
 
     def __init__(self, binance_client, config: Dict[str, Any]):
         """
@@ -199,173 +254,116 @@ class TradeOrchestrator:
             'error': None
         }
 
-        # --- PHASE 4: Pre-trade balance checks ---
-        try:
-            # Calculate required notional for each leg
-            position_size = self.config['position_size']
-            leverage = self.config['leverage']
-            hedge_ratio = self.config['hedge_ratio']
-            total_notional = position_size * leverage
-            short_notional = total_notional * hedge_ratio
-            long_notional = total_notional * hedge_ratio
-
-            # Check spot balance (quote asset, e.g., USDT)
-            spot_balance = self.client.get_spot_balance(symbol)
-            if spot_balance is not None and spot_balance < long_notional:
-                logger.warning(f"Insufficient spot balance for {symbol}: required={long_notional}, available={spot_balance}")
-                result['error'] = f"Insufficient spot balance: required={long_notional}, available={spot_balance}"
-                self._save_trade_history(result)
-                return result
-
-            # Check futures margin balance (quote asset, e.g., USDT)
-            futures_balance = self.client.get_futures_margin_balance(symbol)
-            if futures_balance is not None and futures_balance < short_notional:
-                logger.warning(f"Insufficient futures margin for {symbol}: required={short_notional}, available={futures_balance}")
-                result['error'] = f"Insufficient futures margin: required={short_notional}, available={futures_balance}"
-                self._save_trade_history(result)
-                return result
-        except Exception as e:
-            logger.error(f"Pre-trade balance check failed: {str(e)}")
-            result['error'] = f"Pre-trade balance check failed: {str(e)}"
+        # --- PHASE 8+: Robust order monitoring with retry/partial fill ---
+        max_retries = self.config.get('max_order_retries', 2)
+        # Futures leg
+        fut = self._retry_order_until_filled(self._place_futures_short, symbol, futures_qty, futures_price, True, max_retries)
+        if not fut['success']:
+            logger.error(f"   ❌ Futures order failed after retries.")
+            result['error'] = f"Futures order failed after retries. Filled: {fut['filled_qty']}"
             self._save_trade_history(result)
             return result
+        # Spot leg
+        spot = self._retry_order_until_filled(self._place_spot_long, symbol, spot_qty, spot_price, False, max_retries)
+        if not spot['success']:
+            logger.error(f"   ❌ Spot order failed after retries. Rolling back futures leg.")
+            # Rollback futures leg if possible
+            for oid in fut['order_ids']:
+                self._cancel_order(symbol, oid, is_futures=True)
+            result['error'] = f"Spot order failed after retries. Filled: {spot['filled_qty']}"
+            self._save_trade_history(result)
+            return result
+        # Both orders succeeded or partially filled
+        result['success'] = True
+        result['futures_order_id'] = fut['order_ids'][-1] if fut['order_ids'] else None
+        result['spot_order_id'] = spot['order_ids'][-1] if spot['order_ids'] else None
+        result['futures_filled_qty'] = fut['filled_qty']
+        result['spot_filled_qty'] = spot['filled_qty']
+
+        # Store active trade for monitoring
+        self.active_trades[symbol] = {
+            'trade_group_id': trade_group_id,
+            'opportunity': opportunity,
+            'position': {
+                'futures_qty': fut['filled_qty'],
+                'spot_qty': spot['filled_qty'],
+                'entry_price': futures_price,
+                'futures_entry_price': fut.get('fill_price', futures_price),
+                'spot_entry_price': spot.get('fill_price', spot_price)
+            },
+            'order_ids': {
+                'futures': fut['order_ids'],
+                'spot': spot['order_ids']
+            },
+            'entry_time': datetime.now(),
+            'dry_run': dry_run,
+        }
+
+        logger.info(f"   ✅ Trade executed successfully! Futures filled: {fut['filled_qty']}, Spot filled: {spot['filled_qty']}")
+        self._save_trade_history(result)
+        return result
+    #     logger.info(f"   Expected P&L (1 period): ${expected_pnl:.2f}")
         
-        try:
-            # Calculate position sizes
-            futures_qty, spot_qty, expected_pnl = self._calculate_position_sizes(
-                symbol, mark_price, opportunity['basis']
-            )
-
-            order_type = self.config.get('order_type', 'LIMIT')
-            futures_filters = self.client.get_symbol_filters(symbol, is_futures=True)
-            spot_filters = self.client.get_symbol_filters(symbol, is_futures=False)
-
-            futures_validation = validate_order_inputs(
-                symbol=symbol,
-                market='futures',
-                side='SELL',
-                quantity=futures_qty,
-                price=mark_price,
-                filters=futures_filters,
-                order_type=order_type,
-            )
-            if not futures_validation['ok']:
-                reason = futures_validation['reason']
-                logger.warning(
-                    "Rejected %s futures entry sizing: %s | raw_qty=%.12f rounded_qty=%s price=%s notional=%.8f min_qty=%s min_notional=%s",
-                    symbol,
-                    reason,
-                    futures_validation['raw_quantity'],
-                    futures_validation['quantity_str'],
-                    futures_validation['price_str'],
-                    futures_validation['notional'],
-                    futures_validation['required']['min_qty'],
-                    futures_validation['required']['min_notional'],
-                )
-                result['error'] = f"Futures sizing rejected: {reason}"
-                self._save_trade_history(result)
-                return result
-
-            spot_validation = validate_order_inputs(
-                symbol=symbol,
-                market='spot',
-                side='BUY',
-                quantity=spot_qty,
-                price=mark_price,
-                filters=spot_filters,
-                order_type=order_type,
-            )
-            if not spot_validation['ok']:
-                reason = spot_validation['reason']
-                logger.warning(
-                    "Rejected %s spot entry sizing: %s | raw_qty=%.12f rounded_qty=%s price=%s notional=%.8f min_qty=%s min_notional=%s",
-                    symbol,
-                    reason,
-                    spot_validation['raw_quantity'],
-                    spot_validation['quantity_str'],
-                    spot_validation['price_str'],
-                    spot_validation['notional'],
-                    spot_validation['required']['min_qty'],
-                    spot_validation['required']['min_notional'],
-                )
-                result['error'] = f"Spot sizing rejected: {reason}"
-                self._save_trade_history(result)
-                return result
-
-            futures_qty = futures_validation['quantity']
-            spot_qty = spot_validation['quantity']
-            futures_price = futures_validation['price']
-            spot_price = spot_validation['price']
+    #     if dry_run:
+    #         logger.info(f"   DRY RUN: Would place orders (not executing)")
+    #         result['success'] = True
+    #         result['futures_order_id'] = 'DRY_RUN_FUTURES'
+    #         result['spot_order_id'] = 'DRY_RUN_SPOT'
+    #         self._save_trade_history(result)
+    #         return result
+        
+    #     # Place parallel orders: futures SELL (short) + spot BUY (long)
+    #     futures_result = self._place_futures_short(symbol, futures_qty, futures_price)
+    #     spot_result = self._place_spot_long(symbol, spot_qty, spot_price)
+        
+    #     if not futures_result['success'] or not spot_result['success']:
+    #         logger.error(f"   ❌ Order placement failed - rolling back")
+    #         # Attempt rollback
+    #         if futures_result['success'] and futures_result.get('order_id'):
+    #             self._cancel_order(symbol, futures_result['order_id'], is_futures=True)
+    #         if spot_result['success'] and spot_result.get('order_id'):
+    #             self._cancel_order(symbol, spot_result['order_id'], is_futures=False)
             
-            result['futures_qty'] = futures_qty
-            result['spot_qty'] = spot_qty
-            result['expected_pnl'] = expected_pnl
-            result['position_size'] = self.config['position_size']
-            result['entry_price'] = futures_price
-            
-            logger.info(f"   Position sizing: futures_qty={futures_qty:.8f}, spot_qty={spot_qty:.8f}")
-            logger.info(f"   Expected P&L (1 period): ${expected_pnl:.2f}")
-            
-            if dry_run:
-                logger.info(f"   DRY RUN: Would place orders (not executing)")
-                result['success'] = True
-                result['futures_order_id'] = 'DRY_RUN_FUTURES'
-                result['spot_order_id'] = 'DRY_RUN_SPOT'
-                self._save_trade_history(result)
-                return result
-            
-            # Place parallel orders: futures SELL (short) + spot BUY (long)
-            futures_result = self._place_futures_short(symbol, futures_qty, futures_price)
-            spot_result = self._place_spot_long(symbol, spot_qty, spot_price)
-            
-            if not futures_result['success'] or not spot_result['success']:
-                logger.error(f"   ❌ Order placement failed - rolling back")
-                # Attempt rollback
-                if futures_result['success'] and futures_result.get('order_id'):
-                    self._cancel_order(symbol, futures_result['order_id'], is_futures=True)
-                if spot_result['success'] and spot_result.get('order_id'):
-                    self._cancel_order(symbol, spot_result['order_id'], is_futures=False)
-                
-                result['error'] = f"Futures: {futures_result.get('error')}, Spot: {spot_result.get('error')}"
-                self._save_trade_history(result)
-                return result
-            
-            # Both orders succeeded
-            result['success'] = True
-            result['futures_order_id'] = futures_result.get('order_id')
-            result['spot_order_id'] = spot_result.get('order_id')
-            
-            # Store active trade for monitoring
-            self.active_trades[symbol] = {
-                'trade_group_id': trade_group_id,
-                'opportunity': opportunity,
-                'position': {
-                    'futures_qty': futures_qty,
-                    'spot_qty': spot_qty,
-                        'entry_price': futures_price,
-                        'futures_entry_price': futures_result.get('fill_price', futures_price),
-                        'spot_entry_price': spot_result.get('fill_price', spot_price)
-                },
-                'order_ids': {
-                    'futures': futures_result.get('order_id'),
-                    'spot': spot_result.get('order_id')
-                },
-                'entry_time': datetime.now(),
-                'dry_run': dry_run,
-            }
-            
-            logger.info(f"   ✅ Trade executed successfully!")
-            logger.info(f"      Futures: short {futures_qty:.8f} @ {futures_result.get('fill_price', mark_price):.2f}")
-            logger.info(f"      Spot: long {spot_qty:.8f} @ {spot_result.get('fill_price', spot_price):.2f}")
-            
-            self._save_trade_history(result)
-            return result
-            
-        except Exception as e:
-            logger.error(f"   ❌ Trade execution error: {str(e)}")
-            result['error'] = str(e)
-            self._save_trade_history(result)
-            return result
+    #         result['error'] = f"Futures: {futures_result.get('error')}, Spot: {spot_result.get('error')}"
+    #         self._save_trade_history(result)
+    #         return result
+        
+    #     # Both orders succeeded
+    #     result['success'] = True
+    #     result['futures_order_id'] = futures_result.get('order_id')
+    #     result['spot_order_id'] = spot_result.get('order_id')
+        
+    #     # Store active trade for monitoring
+    #     self.active_trades[symbol] = {
+    #         'trade_group_id': trade_group_id,
+    #         'opportunity': opportunity,
+    #         'position': {
+    #             'futures_qty': futures_qty,
+    #             'spot_qty': spot_qty,
+    #                 'entry_price': futures_price,
+    #                 'futures_entry_price': futures_result.get('fill_price', futures_price),
+    #                 'spot_entry_price': spot_result.get('fill_price', spot_price)
+    #         },
+    #         'order_ids': {
+    #             'futures': futures_result.get('order_id'),
+    #             'spot': spot_result.get('order_id')
+    #         },
+    #         'entry_time': datetime.now(),
+    #         'dry_run': dry_run,
+    #     }
+        
+    #     logger.info(f"   ✅ Trade executed successfully!")
+    #     logger.info(f"      Futures: short {futures_qty:.8f} @ {futures_result.get('fill_price', mark_price):.2f}")
+    #     logger.info(f"      Spot: long {spot_qty:.8f} @ {spot_result.get('fill_price', spot_price):.2f}")
+        
+    #     self._save_trade_history(result)
+    #     return result
+        
+    # except Exception as e:
+    #     logger.error(f"   ❌ Trade execution error: {str(e)}")
+    #     result['error'] = str(e)
+    #     self._save_trade_history(result)
+    #     return result
     
     def _calculate_position_sizes(self, symbol: str, mark_price: float, 
                                  basis: float) -> Tuple[float, float, float]:
@@ -512,6 +510,18 @@ class TradeOrchestrator:
                     if should_exit:
                         logger.info(f"🔴 Exit triggered for {symbol}: {reason}")
                         exit_result = self._close_position(symbol, reason)
+                        # แจ้งเตือน Telegram เมื่อ auto-close
+                        try:
+                            from cmd.main import send_telegram_message
+                            msg = (
+                                f"[Auto-Close] {symbol}\n"
+                                f"เหตุผล: {reason}\n"
+                                f"exit_time: {exit_result.get('exit_time')}\n"
+                                f"pnl: {exit_result.get('pnl')}"
+                            )
+                            send_telegram_message(msg)
+                        except Exception as e:
+                            logger.warning(f"Telegram notify failed: {e}")
                         if exit_result['success']:
                             del self.active_trades[symbol]
                 
