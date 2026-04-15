@@ -16,6 +16,8 @@ from src.internal.funding import get_all_current_funding_opportunities, enrich_o
 
 from src.internal.filter import filter_opportunities, select_best_opportunity
 from src.internal.mysql_logger import insert_funding_logs
+from src.internal.trading import TradeOrchestrator
+from src.binance.binance_funding import BinanceFunding
 
 load_dotenv()
 
@@ -58,8 +60,113 @@ MYSQL_USER = os.getenv("MYSQL_USER", "")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "")
 MYSQL_TABLE_FUNDING_LOGS = os.getenv("MYSQL_TABLE_FUNDING_LOGS", "funding_logs")
+MYSQL_TRADES_ENABLED = os.getenv("MYSQL_TRADES_ENABLED", "false").lower() == "true"
+MYSQL_TABLE_TRADE_HISTORY = os.getenv("MYSQL_TABLE_TRADE_HISTORY", "trade_history")
+
+TRADING_ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
+TRADING_DRY_RUN = os.getenv("TRADING_DRY_RUN", "true").lower() == "true"
+TRADING_POSITION_SIZE = float(os.getenv("TRADING_POSITION_SIZE", str(MAX_POSITION)))
+TRADING_LEVERAGE = float(os.getenv("TRADING_LEVERAGE", "1.0"))
+TRADING_HEDGE_RATIO = float(os.getenv("TRADING_HEDGE_RATIO", "0.5"))
+TRADING_STOP_LOSS_PCT = float(os.getenv("TRADING_STOP_LOSS_PCT", "-0.02"))
+TRADING_EXIT_BASIS_THRESHOLD = float(os.getenv("TRADING_EXIT_BASIS_THRESHOLD", "-0.001"))
+TRADING_ORDER_TYPE = os.getenv("TRADING_ORDER_TYPE", "LIMIT")
+TRADE_HISTORY_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', '.trade_history.json')
+)
+
 
 current_position = None
+
+# =========================
+# PHASE 7: Forecast-Driven Auto Trade
+# =========================
+def phase7_forecast_auto_trade():
+    """เลือก symbol ที่ forecast กำไรดีที่สุด แล้วเปิดเทรด พร้อมแจ้งเตือน Telegram"""
+    print("\n🚦 Phase 7: Forecast-Driven Auto Trade")
+    try:
+        trading_client = BinanceFunding()
+        orchestrator = TradeOrchestrator(
+            trading_client,
+            {
+                'position_size': TRADING_POSITION_SIZE,
+                'leverage': TRADING_LEVERAGE,
+                'hedge_ratio': TRADING_HEDGE_RATIO,
+                'stop_loss_pct': TRADING_STOP_LOSS_PCT,
+                'exit_basis_threshold': TRADING_EXIT_BASIS_THRESHOLD,
+                'order_type': TRADING_ORDER_TYPE,
+                'trade_history_path': TRADE_HISTORY_PATH,
+                'mysql_trades_enabled': MYSQL_TRADES_ENABLED,
+                'mysql_host': MYSQL_HOST,
+                'mysql_port': MYSQL_PORT,
+                'mysql_user': MYSQL_USER,
+                'mysql_password': MYSQL_PASSWORD,
+                'mysql_database': MYSQL_DATABASE,
+                'mysql_table_trade_history': MYSQL_TABLE_TRADE_HISTORY,
+            },
+        )
+        print(f"🤖 Trading enabled (dry_run={TRADING_DRY_RUN})")
+
+        # 1. ดึง funding opportunities
+        opportunities = get_all_current_funding_opportunities()
+        if not opportunities:
+            print("❌ ไม่พบ funding opportunities")
+            return
+
+        # 2. enrich forecast
+        print("⚙️ Enriching forecast for all symbols...")
+        enrich_opportunities_with_forecast(
+            opportunities,
+            forecast_periods=FORECAST_PERIODS,
+            prediction_edge=FORECAST_EDGE,
+            forecast_min_points=FORECAST_MIN_POINTS,
+            forecast_min_r2=FORECAST_MIN_R2,
+            forecast_max_residual_std=FORECAST_MAX_RESIDUAL_STD,
+            forecast_max_relative_std=FORECAST_MAX_RELATIVE_STD,
+            forecast_min_predicted=FORECAST_MIN_PREDICTED,
+            max_workers=8,
+        )
+
+
+        traded_count = 0
+        for i, opp in enumerate(opportunities, 1):
+            f = opp.get('funding_forecast') or {}
+            if (
+                f.get('is_valid') and f.get('confidence_pass') and f.get('forecast_pass')
+                and opp.get('net_profit', 0) > 0
+                and opp.get('risk', 1) <= MAX_RISK
+                and opp.get('basis', 0) >= MIN_BASIS
+                and opp.get('volume', 0) >= MIN_VOLUME
+                and opp.get('spread', 1) <= MAX_SPREAD
+            ):
+                print(f"🚦 {i}. {opp['symbol']} ผ่าน forecast+filter | net_profit={opp.get('net_profit', 0):.6f} | risk={opp.get('risk', 0):.2f} | funding={opp.get('funding_rate', 0):+.4%} | basis={opp.get('basis', 0):+.4%} | volume={opp.get('volume', 0):,.0f} | spread={opp.get('spread', 0):.4%} | r2={f.get('r_squared', 0):.3f}")
+                trade_result = orchestrator.execute_spot_futures_trade(opp, dry_run=TRADING_DRY_RUN)
+                traded_count += 1
+                if trade_result.get('success'):
+                    print(f"✅ Trade path executed (dry_run={TRADING_DRY_RUN})")
+                    print(
+                        f"   futures_order={trade_result.get('futures_order_id')} | "
+                        f"spot_order={trade_result.get('spot_order_id')} | "
+                        f"expected_pnl={trade_result.get('expected_pnl', 0):.2f}"
+                    )
+                    msg = (
+                        f"[Phase7] เปิดออเดอร์ {opp['symbol']}\n"
+                        f"net_profit={opp.get('net_profit', 0):.6f} | risk={opp.get('risk', 0):.2f}\n"
+                        f"futures_order={trade_result.get('futures_order_id')} | "
+                        f"spot_order={trade_result.get('spot_order_id')}\n"
+                        f"expected_pnl={trade_result.get('expected_pnl', 0):.2f}"
+                    )
+                    send_telegram_message(msg)
+                else:
+                    print(f"❌ Trade path failed: {trade_result.get('error')}")
+                    send_telegram_message(f"[Phase7] เปิดออเดอร์ {opp['symbol']} ล้มเหลว: {trade_result.get('error')}")
+        if traded_count == 0:
+            print("❌ ไม่มี symbol ที่ผ่าน forecast gate")
+
+    except Exception as e:
+        print(f"❌ Phase7 Error: {e}")
+        send_telegram_message(f"[Phase7] ERROR: {e}")
+
 
 
 def send_telegram_message(text: str, timeout: int = 20) -> bool:
@@ -324,7 +431,36 @@ def main():
     print("🔍 Scanning for OPTIMAL rates (0.04% - 0.08%)...")
     print("🎯 Sweet spot: Good profits without extreme risk")
     print(f"🧠 Forecast gate required: {REQUIRE_FORECAST}")
+    orchestrator = None
+    trading_client = None
     try:
+        if TRADING_ENABLED:
+            try:
+                trading_client = BinanceFunding()
+                orchestrator = TradeOrchestrator(
+                    trading_client,
+                    {
+                        'position_size': TRADING_POSITION_SIZE,
+                        'leverage': TRADING_LEVERAGE,
+                        'hedge_ratio': TRADING_HEDGE_RATIO,
+                        'stop_loss_pct': TRADING_STOP_LOSS_PCT,
+                        'exit_basis_threshold': TRADING_EXIT_BASIS_THRESHOLD,
+                        'order_type': TRADING_ORDER_TYPE,
+                        'trade_history_path': TRADE_HISTORY_PATH,
+                        'mysql_trades_enabled': MYSQL_TRADES_ENABLED,
+                        'mysql_host': MYSQL_HOST,
+                        'mysql_port': MYSQL_PORT,
+                        'mysql_user': MYSQL_USER,
+                        'mysql_password': MYSQL_PASSWORD,
+                        'mysql_database': MYSQL_DATABASE,
+                        'mysql_table_trade_history': MYSQL_TABLE_TRADE_HISTORY,
+                    },
+                )
+                print(f"🤖 Trading enabled (dry_run={TRADING_DRY_RUN})")
+            except Exception as trade_init_err:
+                print(f"⚠️ Trading init failed, fallback to scanner-only mode: {trade_init_err}")
+                orchestrator = None
+
         # Get current live funding rates for ALL symbols (single API call)
         opportunities = get_funding_symbol_rate()
         print(f"✅ Found {len(opportunities)} optimal funding opportunities")
@@ -366,9 +502,23 @@ def main():
             if best:
                 print("\n⭐️ Best Opportunity:")
                 print(f"{best['symbol']} | risk={best['risk']:.2f} | basis={best['basis']:+.4%} | funding={best['funding_rate']:+.4%} | volume={best['volume']:.0f} | spread={best['spread']:.4%} | net_profit={best['net_profit']:.6f} | selected_rounds={best['best_rounds']}")
+                if orchestrator:
+                    trade_result = orchestrator.execute_spot_futures_trade(best, dry_run=TRADING_DRY_RUN)
+                    if trade_result.get('success'):
+                        print(f"✅ Trade path executed (dry_run={TRADING_DRY_RUN})")
+                        print(
+                            f"   futures_order={trade_result.get('futures_order_id')} | "
+                            f"spot_order={trade_result.get('spot_order_id')} | "
+                            f"expected_pnl={trade_result.get('expected_pnl', 0):.2f}"
+                        )
+                    else:
+                        print(f"❌ Trade path failed: {trade_result.get('error')}")
             else:
                 print("❌ No symbol passed all strict filters for best opportunity.")
 
+
+        if TRADING_ENABLED and orchestrator is None:
+            print("ℹ️ Trading branch skipped (initialization failed).")
 
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -376,7 +526,10 @@ def main():
     except KeyboardInterrupt:
         print("\n⏹️ Interrupted by user")
         sys.exit(0)
+    finally:
+        if trading_client:
+            trading_client.close()
 
 
 if __name__ == "__main__":
-    main()
+    phase7_forecast_auto_trade()

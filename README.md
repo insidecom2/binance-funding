@@ -126,6 +126,83 @@ The `BinanceFunding` class accepts the following parameters:
 client = BinanceFunding(timeout=60, retries=5)
 ```
 
+### Trading API Credentials
+
+Authenticated account/order methods require Binance API credentials in `env`:
+
+```bash
+BINANCE_API_KEY=your_key
+BINANCE_SECRET_KEY=your_secret
+BINANCE_RECV_WINDOW=5000
+```
+
+The read-only scanner methods (`get_funding_rate`, `get_premium_index`, `get_klines`) continue to work without these credentials.
+
+### Authenticated Methods
+
+The client now supports authenticated wrappers for account and order workflows:
+
+- `place_futures_order(...)`
+- `place_spot_order(...)`
+- `cancel_order(...)`
+- `get_order(...)`
+- `get_account_balance(...)`
+- `get_position_info(...)`
+
+All authenticated failures raise `BinanceFundingError` with mapped API context (HTTP status + Binance error code/message).
+
+### MySQL Trade History Logging
+
+To persist trade history into MySQL, enable these env keys:
+
+```bash
+MYSQL_ENABLED=true
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=your_user
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=your_database
+MYSQL_TRADES_ENABLED=true
+MYSQL_TABLE_TRADE_HISTORY=trade_history
+```
+
+Apply migration:
+
+```bash
+mysql -h 127.0.0.1 -P 3306 -u your_user -p your_database < migrations/mysql/20260412_001_create_trade_history.sql
+```
+
+For MySQL 5.7 compatibility (uses LONGTEXT for `raw_payload`), use:
+
+```bash
+mysql -h 127.0.0.1 -P 3306 -u your_user -p your_database < migrations/mysql/20260412_002_create_trade_history_mysql57.sql
+```
+
+Create daily summary view:
+
+```bash
+mysql -h 127.0.0.1 -P 3306 -u your_user -p your_database < migrations/mysql/20260412_003_create_trade_history_daily_view.sql
+```
+
+Trade history fields include:
+
+- `trade_group_id` (correlates ENTRY and EXIT of the same trade lifecycle)
+- `event_time`, `entry_time`, `exit_time`
+- `symbol`, `event_type`, `is_dry_run`, `success`
+- Order identifiers: `futures_order_id`, `spot_order_id`, `futures_close_id`, `spot_close_id`
+- Sizing/pricing: `entry_price`, `futures_qty`, `spot_qty`, `position_size`
+- Performance/risk: `expected_pnl`, `realized_pnl`, `funding_rate`, `basis`, `risk_score`
+- Diagnostics: `exit_reason`, `error_message`, `raw_payload`
+
+Example query:
+
+```sql
+SELECT *
+FROM v_trade_history_daily_summary
+WHERE trade_date >= CURDATE() - INTERVAL 7 DAY
+ORDER BY trade_date DESC, symbol;
+```
+
 ## Error Handling 🔧
 
 The module includes comprehensive error handling:
