@@ -532,4 +532,5 @@ def main():
 
 
 if __name__ == "__main__":
+    
     phase7_forecast_auto_trade()
