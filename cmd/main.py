@@ -75,7 +75,111 @@ TRADE_HISTORY_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', '.trade_history.json')
 )
 
+
 current_position = None
+
+# =========================
+# PHASE 7: Forecast-Driven Auto Trade
+# =========================
+def phase7_forecast_auto_trade():
+    """เลือก symbol ที่ forecast กำไรดีที่สุด แล้วเปิดเทรด พร้อมแจ้งเตือน Telegram"""
+    print("\n🚦 Phase 7: Forecast-Driven Auto Trade")
+    try:
+        trading_client = BinanceFunding()
+        orchestrator = TradeOrchestrator(
+            trading_client,
+            {
+                'position_size': TRADING_POSITION_SIZE,
+                'leverage': TRADING_LEVERAGE,
+                'hedge_ratio': TRADING_HEDGE_RATIO,
+                'stop_loss_pct': TRADING_STOP_LOSS_PCT,
+                'exit_basis_threshold': TRADING_EXIT_BASIS_THRESHOLD,
+                'order_type': TRADING_ORDER_TYPE,
+                'trade_history_path': TRADE_HISTORY_PATH,
+                'mysql_trades_enabled': MYSQL_TRADES_ENABLED,
+                'mysql_host': MYSQL_HOST,
+                'mysql_port': MYSQL_PORT,
+                'mysql_user': MYSQL_USER,
+                'mysql_password': MYSQL_PASSWORD,
+                'mysql_database': MYSQL_DATABASE,
+                'mysql_table_trade_history': MYSQL_TABLE_TRADE_HISTORY,
+            },
+        )
+        print(f"🤖 Trading enabled (dry_run={TRADING_DRY_RUN})")
+
+        # 1. ดึง funding opportunities
+        opportunities = get_all_current_funding_opportunities()
+        if not opportunities:
+            print("❌ ไม่พบ funding opportunities")
+            return
+
+        # 2. enrich forecast
+        print("⚙️ Enriching forecast for all symbols...")
+        enrich_opportunities_with_forecast(
+            opportunities,
+            forecast_periods=FORECAST_PERIODS,
+            prediction_edge=FORECAST_EDGE,
+            forecast_min_points=FORECAST_MIN_POINTS,
+            forecast_min_r2=FORECAST_MIN_R2,
+            forecast_max_residual_std=FORECAST_MAX_RESIDUAL_STD,
+            forecast_max_relative_std=FORECAST_MAX_RELATIVE_STD,
+            forecast_min_predicted=FORECAST_MIN_PREDICTED,
+            max_workers=8,
+        )
+
+        # 3. filter เฉพาะ forecast pass + net profit > 0 + risk/basis/volume/spread
+        filtered = []
+        for opp in opportunities:
+            f = opp.get('funding_forecast') or {}
+            if not (f.get('is_valid') and f.get('confidence_pass') and f.get('forecast_pass')):
+                continue
+            if opp.get('net_profit', 0) <= 0:
+                continue
+            if opp.get('risk', 1) > MAX_RISK:
+                continue
+            if opp.get('basis', 0) < MIN_BASIS:
+                continue
+            if opp.get('volume', 0) < MIN_VOLUME:
+                continue
+            if opp.get('spread', 1) > MAX_SPREAD:
+                continue
+            filtered.append(opp)
+
+        if not filtered:
+            print("❌ ไม่มี symbol ที่ผ่าน forecast + filter")
+            return
+
+        # 4. เลือก symbol ที่ net profit สูงสุด (tie-breaker risk ต่ำ)
+        filtered.sort(key=lambda x: (-x['net_profit'], x['risk'], -x['basis'], -x['volume']))
+        best = filtered[0]
+        print(f"⭐️ Best Forecast Opportunity: {best['symbol']} | net_profit={best['net_profit']:.6f} | risk={best['risk']:.2f}")
+
+        # 5. เปิดสถานะเทรดผ่าน orchestrator
+        trade_result = orchestrator.execute_spot_futures_trade(best, dry_run=TRADING_DRY_RUN)
+        if trade_result.get('success'):
+            print(f"✅ Trade path executed (dry_run={TRADING_DRY_RUN})")
+            print(
+                f"   futures_order={trade_result.get('futures_order_id')} | "
+                f"spot_order={trade_result.get('spot_order_id')} | "
+                f"expected_pnl={trade_result.get('expected_pnl', 0):.2f}"
+            )
+            # 6. แจ้งเตือน Telegram
+            msg = (
+                f"[Phase7] เปิดออเดอร์ {best['symbol']}\n"
+                f"net_profit={best['net_profit']:.6f} | risk={best['risk']:.2f}\n"
+                f"futures_order={trade_result.get('futures_order_id')} | "
+                f"spot_order={trade_result.get('spot_order_id')}\n"
+                f"expected_pnl={trade_result.get('expected_pnl', 0):.2f}"
+            )
+            send_telegram_message(msg)
+        else:
+            print(f"❌ Trade path failed: {trade_result.get('error')}")
+            send_telegram_message(f"[Phase7] เปิดออเดอร์ {best['symbol']} ล้มเหลว: {trade_result.get('error')}")
+
+    except Exception as e:
+        print(f"❌ Phase7 Error: {e}")
+        send_telegram_message(f"[Phase7] ERROR: {e}")
+
 
 
 def send_telegram_message(text: str, timeout: int = 20) -> bool:
@@ -441,4 +545,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()  # ปิด main เดิมถ้าต้องการรัน phase7 เท่านั้น
+    phase7_forecast_auto_trade()
