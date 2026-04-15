@@ -352,11 +352,28 @@ def enrich_opportunities_with_forecast(
     max_workers=5,
 ):
     """Populate funding_forecast for each provided opportunity in parallel."""
+    # Filter opportunities by funding rate before enrichment
     if not opportunities:
         return opportunities
+    filtered_opps = []
+    for opp in opportunities:
+        # Try to get funding rate from common keys
+        rate = None
+        if 'max_rate' in opp and isinstance(opp['max_rate'], dict):
+            rate = opp['max_rate'].get('value')
+        elif 'funding_rate' in opp:
+            rate = opp['funding_rate']
+        if rate is not None and 0.0005 <= rate <= 0.0010:
+            filtered_opps.append(opp)
+    if not filtered_opps:
+        print("[⚠️] No opportunities in funding range 0.0005-0.0010. Skipping forecast enrichment.")
+        return []
+    opportunities = filtered_opps
 
+    import time
     def _compute_for_opp(opp):
         symbol = opp.get('symbol', '')
+        t0 = time.time()
         if not symbol:
             return opp, {
                 'is_valid': False,
@@ -375,9 +392,18 @@ def enrich_opportunities_with_forecast(
             max_relative_std=forecast_max_relative_std,
             min_predicted_next=forecast_min_predicted,
         )
+        elapsed = time.time() - t0
+        print(f"[⏱️] Forecast {symbol} finished in {elapsed:.2f}s")
         return opp, forecast
 
-    workers = max(1, min(max_workers, len(opportunities)))
+    import os
+    if max_workers is None:
+        # Auto-tune: use min(CPU count * 2, 32, len(opportunities))
+        cpu_count = os.cpu_count() or 4
+        workers = min(cpu_count * 2, 32, len(opportunities))
+    else:
+        workers = max(1, min(max_workers, len(opportunities)))
+    t_start = time.time()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {executor.submit(_compute_for_opp, opp): opp for opp in opportunities}
         for future in as_completed(future_map):
@@ -393,4 +419,6 @@ def enrich_opportunities_with_forecast(
                     'fail_reason': f'forecast_enrich_error: {e}',
                     'points_used': 0,
                 }
+    t_end = time.time()
+    print(f"[⏱️] All forecasts finished in {t_end - t_start:.2f}s (total)")
     return opportunities
