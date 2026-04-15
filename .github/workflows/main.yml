@@ -26,4 +26,5 @@ jobs:
           script: |
             git checkout master
             cd app/binance-funding
+            git pull
             ./deploy.sh
