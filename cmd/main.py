@@ -22,13 +22,14 @@ from src.binance.binance_funding import BinanceFunding
 load_dotenv()
 
 
-MIN_FUNDING = 0.0002
+MIN_FUNDING = 0.0007
 MIN_FUNDING_EXIT = 0
-MIN_BASIS = float(os.getenv("MIN_BASIS", "0.0005"))
+MIN_BASIS = float(os.getenv("MIN_BASIS", "0.0002"))
 MIN_BASIS_EXIT = -0.001
 MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500000"))
-MAX_SPREAD = 0.004
+MAX_SPREAD = 0.002
 MAX_RISK = 0.5
+MAX_MINUTES_TO_FUNDING = int(os.getenv("MAX_MINUTES_TO_FUNDING", "60"))
 
 RISK_PER_TRADE = 0.1
 MAX_POSITION = 1000
@@ -483,22 +484,11 @@ def main():
                 f"volume >= {MIN_VOLUME:,.0f}, spread <= {MAX_SPREAD:.2%}, กำไรสุทธิสูงสุด):"
             )
             for i, opp in enumerate(filtered, 1):
-                selected_rounds = opp.get('selected_rounds', 1)
-                print(f"{i}. {opp['symbol']} | risk={opp['risk']:.2f} | basis={opp['basis']:+.4%} | funding={opp['funding_rate']:+.4%} | volume={opp['volume']:.0f} | spread={opp['spread']:.4%} | net_profit={opp['net_profit']:.6f} | rounds={selected_rounds}")
+                print(f"{i}. {opp['symbol']} | risk={opp['risk']:.2f} | basis={opp['basis']:+.4%} | funding={opp['funding_rate']:+.4%} | volume={opp['volume']:.0f} | spread={opp['spread']:.4%} | net_profit={opp['net_profit']:.6f} | rounds={opp['best_rounds']}")
             if not filtered:
                 print("❌ No opportunities passed all filters.")
 
-            # เลือกเหรียญที่ผ่านเงื่อนไข โดยเน้นกำไรสุทธิสูงสุดและใช้ risk ต่ำเป็นตัวตัดสินรอง
-            best = select_best_opportunity(
-                opportunities,
-                min_basis=MIN_BASIS,
-                min_funding=MIN_FUNDING,
-                min_volume=MIN_VOLUME,
-                max_spread=MAX_SPREAD,
-                max_risk=MAX_RISK,
-                position_size=MAX_POSITION,
-                require_forecast=REQUIRE_FORECAST,
-            )
+            best = select_best_opportunity(filtered)
             if best:
                 print("\n⭐️ Best Opportunity:")
                 print(f"{best['symbol']} | risk={best['risk']:.2f} | basis={best['basis']:+.4%} | funding={best['funding_rate']:+.4%} | volume={best['volume']:.0f} | spread={best['spread']:.4%} | net_profit={best['net_profit']:.6f} | selected_rounds={best['best_rounds']}")

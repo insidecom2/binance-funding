@@ -460,6 +460,19 @@ class BinanceFunding:
         logger.info(f"Fetching funding rate for {symbol} (limit: {limit})")
         return self._make_request("/fapi/v1/fundingRate", params)
     
+    def get_trading_symbols(self) -> set:
+        """Return set of USDT-margined perpetual futures symbols that are currently TRADING."""
+        data = self._make_request("/fapi/v1/exchangeInfo", {})
+        symbols = set()
+        for s in data.get("symbols", []):
+            if (
+                s.get("status") == "TRADING"
+                and s.get("contractType") == "PERPETUAL"
+                and str(s.get("symbol", "")).endswith("USDT")
+            ):
+                symbols.add(s["symbol"])
+        return symbols
+
     def get_premium_index(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Get mark price and funding rate for symbol(s)

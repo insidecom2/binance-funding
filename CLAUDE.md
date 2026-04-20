@@ -1,126 +1,194 @@
 # CLAUDE PROJECT NOTES
 
-อัปเดตล่าสุด: 2026-04-10
-สถานะเอกสารนี้อิงจากโค้ดที่ใช้งานจริงในโปรเจกต์ ณ ตอนนี้
+อัปเดตล่าสุด: 2026-04-20
 
-## ภาพรวมระบบปัจจุบัน
+## ภาพรวมระบบ
 
-โปรเจกต์นี้เป็น Funding Rate Scanner สำหรับ Binance Futures โดย flow หลักที่รันจริงตอนนี้คือ
+Funding Rate Scanner และ Trading Bot สำหรับ Binance Futures
+Strategy: **Short Futures + Long Spot** (delta-neutral hedge) เพื่อรับ funding payment ทุก 8 ชั่วโมง
 
-1. ดึงข้อมูล premium index ทุกคู่ที่ลงท้ายด้วย USDT
-2. คัดเฉพาะ funding rate ที่อยู่ในช่วงเป้าหมาย 0.05% - 0.10%
-3. ส่งต่อเข้า filter หลายชั้น (funding, risk, basis, volume, spread, net profit)
-4. แสดงรายการที่ผ่านเงื่อนไข และเลือกเหรียญที่ดีที่สุด 1 ตัว
+## Stack
 
-หมายเหตุสำคัญ:
+- Python 3
+- Binance Futures + Spot API
+- XGBoost (risk scoring)
+- MySQL (trade/funding log)
+- Telegram (notification)
 
-- โมดูล forecast มีอยู่ในระบบแล้ว แต่ main flow ตอนนี้ยังไม่ได้เปิดใช้งานแบบ require forecast
-- โมดูล trading orchestration ถูกสร้างไว้แล้ว แต่ยังไม่ได้เชื่อมเข้ากับ main flow
+---
 
-## STACK TECH
+## โครงสร้างไฟล์หลัก
 
-- Python3
-- Telegram
-- Binance API
+```
+cmd/main.py                   # Entry point (phase7_forecast_auto_trade)
+src/binance/binance_funding.py # Binance API client
+src/internal/filter.py         # Filter pipeline (7 gates)
+src/internal/funding.py        # Funding scanner + forecast enrichment
+src/internal/trading.py        # TradeOrchestrator (ยังไม่ได้เปิดใช้งาน)
+src/internal/basis.py          # Basis calculation
+src/internal/spread.py         # Spread calculation
+src/internal/volume.py         # Volume fetching
+src/internal/mysql_logger.py   # MySQL logging
+src/xgb/risk_predictor.py      # XGBoost risk + fee calculation
+```
 
-## Main Runtime Behavior
+---
 
-ไฟล์คำสั่งหลักทำงานแบบ Scanner เป็นหลัก ยังไม่ยิง order จริง
+## สถานะการทำงานปัจจุบัน
 
-พฤติกรรมหลัก:
+| ส่วน | สถานะ |
+|---|---|
+| Funding Scanner | ✅ ทำงานอยู่ |
+| Filter Pipeline (7 gates) | ✅ ทำงานอยู่ |
+| Forecast Module | ✅ เปิดใช้งาน (`REQUIRE_FORECAST=true`) |
+| MySQL Logging (funding_logs) | ✅ เปิดใช้งาน |
+| Telegram Notification | ✅ เปิดใช้งาน |
+| Trading Execution | ❌ ปิดอยู่ (`TRADING_ENABLED=false`) |
+| Dry Run Mode | ✅ เปิดอยู่ (`TRADING_DRY_RUN=true`) |
+| MySQL Trade History | ❌ ปิดอยู่ (`MYSQL_TRADES_ENABLED=false`) |
 
-- อ่านค่าคอนฟิก threshold จากตัวแปรคงที่ในโค้ด
-- ดึงโอกาสจาก get_all_current_funding_opportunities
-- เลือก top 5 ในช่วง funding ที่กำหนด
-- เรียก filter_opportunities เพื่อจัดอันดับตามกำไรสุทธิและความเสี่ยง
-- เรียก select_best_opportunity เพื่อหา best single symbol
-- พิมพ์ผลลัพธ์ออกทาง console
+---
 
-## Filtering Logic ที่ใช้งานอยู่
+## Filter Pipeline — 7 Gates (เรียงตามลำดับ)
 
-เงื่อนไขหลักใน pipeline:
+ทุก gate ใช้ `continue` — ถ้าไม่ผ่านจะถูก reject ทันที
 
-- funding_rate ต้องมากกว่าหรือเท่ากับ min_funding
-- risk score (normalize แล้ว) ต้องไม่เกิน max_risk
-- basis ต้องมากกว่าหรือเท่ากับ min_basis
-- volume ต้องมากกว่าหรือเท่ากับ min_volume
-- spread ต้องไม่เกิน max_spread
-- net profit หลังหัก fee ต้องไม่ติดลบ (ยอม fallback ไปรอบที่ 2 ได้)
+| # | Gate | ค่า (hardcode ใน main.py) | หมายเหตุ |
+|---|---|---|---|
+| 1 | `funding_rate >=` | **0.0007 (0.07%)** | floor สำหรับ break-even ที่ 10 รอบ |
+| 2 | `forecast` | optional (`REQUIRE_FORECAST`) | confidence_pass + forecast_pass ต้องผ่านทั้งคู่ |
+| 3 | `risk score <=` | **0.5** | XGBoost normalized score |
+| 4 | `basis >=` | **0.0002 (0.02%)** | futures premium over spot |
+| 5 | `volume >=` | **500,000** | 1h kline volume (USDT) |
+| 6 | `spread <=` | **0.002 (0.2%)** | mark vs index spread |
+| 7 | `net_profit >= 0` | best of 10 rounds | รวม spot fee + spread cost |
 
-การจัดอันดับผลลัพธ์:
+`select_best_opportunity(filtered)` คืน `filtered[0]` เลย (sorted แล้ว)
 
-- เรียงตาม net_profit มากไปน้อย
-- ถ้าเท่ากันใช้ risk ต่ำกว่าเป็นตัวชนะ
-- ตามด้วย funding, basis, volume, spread เป็น tie-breaker
+---
 
-## Forecast Module Status
+## Fee Calculation (ครบทุกต้นทุน)
 
-มีโค้ดรองรับ forecast แล้วใน internal funding
+```python
+# calculate_net_profit_with_fees(position_size, funding_rate, rounds, spread)
+futures_taker = 0.04% per side
+spot_taker    = 0.10% per side  ← สำคัญ ต้องนับ spot ด้วย
+total_fees    = position_size × (0.0004 + 0.001) × 2  = $2.80 ต่อ $1,000
+spread_cost   = position_size × spread × 2
+total_cost    = total_fees + spread_cost
+net_profit    = (funding_rate × rounds × position_size) - total_cost
+```
 
-สิ่งที่มีอยู่แล้ว:
+**Break-even reference ($1,000 position, spread 0.2%)**
 
-- linear regression forecasting จาก funding history
-- metric ที่คำนวณได้: slope, intercept, r_squared, residual_std, predicted_next
-- confidence gates: min points, min r2, max residual std
-- helper สำหรับ enrich forecast แบบ parallel
+| Rounds | ระยะเวลา | funding rate ที่ต้อง break-even |
+|---|---|---|
+| 2 | 16 ชม. | 0.34% |
+| 5 | 40 ชม. | 0.136% |
+| 10 | 80 ชม. | **0.068%** ← ใช้เป็น MIN_FUNDING |
 
-สถานะ integration:
+---
 
-- ฟังก์ชันพร้อมใช้
-- แต่ใน main flow ตอนนี้ยังเรียก scanner แบบปกติ (ไม่บังคับ forecast gate)
+## Forecast Module
 
-## Trading Execution Module Status
+**ฟังก์ชัน**: `get_next_funding_forecast()` ใน `src/internal/funding.py`
 
-มีโมดูล orchestration สำหรับ futures short + spot long แล้ว
+**ทำงานอย่างไร**: Linear regression บน funding rate history 20 periods
 
-ความสามารถในโมดูล:
+**Confidence Gate** (ต้องผ่านทุกข้อ):
+- `points_used >= 6`
+- `r_squared >= 0.05`
+- `residual_std <= 0.0012`
+- `relative_std <= 1.5`
 
-- คำนวณขนาด position ตาม position size, leverage, hedge ratio
-- flow เปิดสถานะ 2 ขา (futures short + spot long)
-- monitoring loop สำหรับ stop-loss, basis reversal, age timeout
-- close position และสรุป PnL
-- เขียน trade history ลงไฟล์ json
+**Forecast Gate** (ต้องผ่านทั้งคู่):
+- `predicted_next >= current_rate + (-0.0001)`
+- `predicted_next >= 0.0001`
 
-ข้อจำกัดปัจจุบัน:
+**Enrichment**: ทำแบบ parallel ด้วย `ThreadPoolExecutor` ก่อนส่งเข้า filter
 
-- main flow ยังไม่เรียกใช้งาน module นี้
-- BinanceFunding client ปัจจุบันยังเป็นแนว read API เป็นหลัก
-- หากต้องการ live execution ต้องเติม authenticated order endpoints และ wiring เพิ่มใน main
+---
 
-## Config Snapshot (Current Defaults)
+## Thresholds ใน .env (override ค่า hardcode ได้)
 
-ค่าหลักในระบบตอนนี้:
+```bash
+MIN_BASIS=0.0005              # override MIN_BASIS ใน main.py
+MIN_VOLUME=20000              # override MIN_VOLUME ใน main.py (ต่ำกว่า hardcode!)
+REQUIRE_FORECAST=true
+FORECAST_PERIODS=20
+FORECAST_EDGE=-0.0001
+FORECAST_MIN_POINTS=6
+FORECAST_MIN_R2=0.05
+FORECAST_MAX_RESIDUAL_STD=0.0012
+FORECAST_MAX_RELATIVE_STD=1.5
+FORECAST_MIN_PREDICTED=0.0001
+MAX_MINUTES_TO_FUNDING=60     # ข้อมูล info เท่านั้น ไม่ใช่ hard gate
+```
 
-- MIN_FUNDING = 0.0002
-- MIN_BASIS = 0.0005
-- MIN_VOLUME = 500000
-- MAX_SPREAD = 0.004
-- MAX_RISK = 0.5
-- MAX_POSITION = 1000
+> ⚠️ **หมายเหตุ**: `MIN_VOLUME` ใน `.env` = 20,000 ต่ำกว่า hardcode 500,000 มาก
+> ต้องตรวจสอบว่าตั้งใจหรือไม่
 
-ช่วง funding ที่ scanner ใช้คัดก่อนเข้า filter:
+---
 
-- min_rate = 0.0005
-- max_rate = 0.0010
+## ข้อควรระวัง (Gotchas)
 
-## สิ่งที่พร้อมใช้งานทันที
+### 1. Invalid Symbol Error (400 -1121)
+Bulk `premiumIndex` call คืน symbol ที่กำลัง delisting กลับมาด้วย
+พอเรียก `klines` / `premiumIndex` แบบ individual จะได้ 400 -1121
+**แก้แล้ว**: `get_basis`, `get_volume`, `get_spread` ทุกตัว try/except → return None → reject ที่ filter
 
-- Funding scanner แบบเต็มตลาด USDT futures
-- Ranking opportunities ด้วย risk + basis + volume + spread + net profit
-- Best opportunity selection
+### 2. Timing Gate ถูกลบออกจาก Filter แล้ว
+`max_minutes_to_funding` ไม่ใช่ hard gate อีกต่อไป
+แสดงเป็น `minutes_to_funding` ใน candidate เท่านั้น
+ถ้าต้องการ gate ต้องทำที่ execution layer
 
-## สิ่งที่ยังต้องต่อให้ครบก่อนเทรดจริง
+### 3. `filter_opportunities` vs `select_best_opportunity`
+`select_best_opportunity(filtered)` รับเฉพาะ `filtered` list (ผ่าน filter แล้ว)
+**อย่า** ส่ง raw `opportunities` เข้า `select_best_opportunity`
 
-1. เพิ่ม authenticated trading methods ใน Binance client
-2. เชื่อม TradeOrchestrator เข้า main flow พร้อมสวิตช์ dry run และ live
-3. เพิ่มการจัดการ precision/step size/min notional ตาม symbol filter
-4. เพิ่ม safety checks (balance, slippage, partial fill rollback)
-5. เพิ่ม tests สำหรับ sizing, exit condition, และ error handling
+### 4. Spot Fee ต้องนับใน net profit
+fee เดิมนับแค่ futures ($0.80) — แก้แล้วให้นับ spot ด้วย ($2.80 รวม)
 
-## Recommended Next Step
+---
 
-เริ่มจาก phase ที่ปลอดภัยที่สุดก่อน:
+## Trading Orchestration (ยังไม่ได้เปิด)
 
-- ทำ dry-run integration ใน main โดยไม่ยิง order จริง
-- ตรวจ log output และ trade history ว่าตรรกะครบ
-- ค่อยเปิด live execution เฉพาะ symbol เดียวและ notional ต่ำ
+`src/internal/trading.py` — `TradeOrchestrator`
+
+ความสามารถที่มีแล้ว:
+- คำนวณขนาด position (futures qty + spot qty)
+- เปิด 2 ขา: SELL futures + BUY spot
+- Retry + rollback ถ้า leg ใด leg หนึ่งล้มเหลว
+- Monitoring loop: stop-loss, basis reversal, age timeout
+- ปิด position + คำนวณ realized PnL
+- บันทึก trade history (JSON + MySQL)
+
+**ก่อนเปิดใช้งาน live trading ต้องทำ**:
+1. ใส่ `BINANCE_API_KEY` และ `BINANCE_SECRET_KEY` ใน `.env`
+2. ตั้ง `TRADING_ENABLED=true`
+3. ตั้ง `TRADING_DRY_RUN=false` เมื่อพร้อม live
+4. ตรวจสอบ precision/step size ผ่าน `src/internal/symbol_rules.py`
+5. ทดสอบ dry-run ให้ครบก่อน
+
+---
+
+## MySQL Tables
+
+| Table | เนื้อหา | สถานะ |
+|---|---|---|
+| `funding_logs` | symbol ที่ผ่าน forecast gate (current, next, delta, r2) | ✅ Active |
+| `trade_history` | entry/exit event, order IDs, PnL, exit_reason | ❌ Disabled |
+
+---
+
+## Binance API Endpoints ที่ใช้
+
+| Endpoint | วัตถุประสงค์ |
+|---|---|
+| `GET /fapi/v1/premiumIndex` (no symbol) | ดึง funding rate ทุก symbol ในคราวเดียว |
+| `GET /fapi/v1/premiumIndex?symbol=X` | basis + spread (individual) |
+| `GET /fapi/v1/fundingRate` | history สำหรับ forecast |
+| `GET /fapi/v1/klines` | volume |
+| `GET /fapi/v1/exchangeInfo` | symbol filters (step size, min notional) |
+
+Authenticated endpoints (order placement) มีอยู่ในโค้ดแต่ยังไม่ได้ใช้งาน

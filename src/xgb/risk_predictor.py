@@ -233,47 +233,57 @@ def get_multi_round_recommendation(sust_1: float, sust_2: float, squeeze: float)
         return "EXIT ASAP - Low sustainability"
 
 
-def calculate_net_profit_with_fees(position_size: float, funding_rate: float, rounds: int = 1) -> dict:
-    """Calculate net profit after trading fees for funding rate strategy"""
-    
-    # Binance trading fees (standard rates)
-    maker_fee = 0.0002  # 0.02%
-    taker_fee = 0.0004  # 0.04%
-    
-    # Assume worst case: both entry and exit are taker orders
-    entry_fee = position_size * taker_fee
-    exit_fee = position_size * taker_fee
-    total_fees = entry_fee + exit_fee
-    
-    # Funding profit calculation
+def calculate_net_profit_with_fees(
+    position_size: float,
+    funding_rate: float,
+    rounds: int = 1,
+    spread: float = 0.0,
+) -> dict:
+    """Calculate net profit after trading fees for short-futures + long-spot strategy.
+
+    Costs included:
+      - Futures taker fee (entry + exit): 0.04% × 2
+      - Spot taker fee (entry + exit):    0.10% × 2
+      - Spread friction (entry + exit):   spread × 2
+    """
+    futures_taker_fee = 0.0004  # 0.04% per side
+    spot_taker_fee    = 0.001   # 0.10% per side
+
+    # Round-trip fees (entry + exit) for both legs
+    total_fees = position_size * (futures_taker_fee + spot_taker_fee) * 2
+
+    # Round-trip spread friction (entry + exit)
+    spread_cost = position_size * spread * 2
+
+    total_cost = total_fees + spread_cost
+
+    # Funding profit
     funding_profit_per_round = position_size * funding_rate
     total_funding_profit = funding_profit_per_round * rounds
-    
-    # Net profit = funding profit - trading fees
-    net_profit = total_funding_profit - total_fees
-    
-    # Profitability analysis
-    fee_coverage_ratio = total_funding_profit / total_fees if total_fees > 0 else 0
-    
+
+    net_profit = total_funding_profit - total_cost
+
+    fee_coverage_ratio = total_funding_profit / total_cost if total_cost > 0 else 0
+
     if net_profit > 0:
         profitability = "✅ PROFITABLE"
         profit_color = "🟢"
-    elif net_profit > -0.10:  # Small loss
+    elif net_profit > -0.10:
         profitability = "⚠️ BREAK-EVEN"
         profit_color = "🟡"
     else:
         profitability = "❌ UNPROFITABLE"
         profit_color = "🔴"
-    
+
     return {
         'funding_profit': total_funding_profit,
         'trading_fees': total_fees,
+        'spread_cost': spread_cost,
+        'total_cost': total_cost,
         'net_profit': net_profit,
         'fee_coverage_ratio': fee_coverage_ratio,
         'profitability': profitability,
         'profit_color': profit_color,
-        'entry_fee': entry_fee,
-        'exit_fee': exit_fee
     }
 
 

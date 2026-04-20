@@ -296,10 +296,12 @@ def get_all_current_funding_opportunities(
     opportunities = []
     try:
         with BinanceFunding() as client:
+            # ดึง valid trading symbols ก่อนเพื่อ filter out delisted/invalid symbols
+            valid_symbols = client.get_trading_symbols()
             all_premium_data = client.get_premium_index()  # No symbol = all symbols
             for data in all_premium_data:
                 symbol = data['symbol']
-                if not symbol.endswith('USDT'):
+                if symbol not in valid_symbols:
                     continue
                 try:
                     current_rate = float(data['lastFundingRate'])
@@ -393,7 +395,8 @@ def enrich_opportunities_with_forecast(
             min_predicted_next=forecast_min_predicted,
         )
         elapsed = time.time() - t0
-        print(f"[⏱️] Forecast {symbol} finished in {elapsed:.2f}s")
+        rate = opp.get('max_rate', {}).get('value', 0)
+        print(f"[⏱️] Forecast {symbol} | funding={rate:+.4%} | finished in {elapsed:.2f}s")
         return opp, forecast
 
     import os
