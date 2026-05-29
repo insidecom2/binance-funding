@@ -40,6 +40,7 @@ class SweepToolsTest(unittest.TestCase):
             forecast_max_residual_std=0.0012,
             forecast_max_relative_std=1.5,
             forecast_min_predicted=0.0001,
+            forecast_top_n=20,
             telegram_bot_token="",
             telegram_chat_id="",
             telegram_notify_cooldown_minutes=5,

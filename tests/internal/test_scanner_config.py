@@ -18,6 +18,7 @@ class ScannerConfigTest(unittest.TestCase):
             "POSITION_SIZE": "1500",
             "REQUIRE_FORECAST": "true",
             "FORECAST_PERIODS": "12",
+            "FORECAST_TOP_N": "15",
             "MYSQL_ENABLED": "true",
             "MYSQL_HOST": "db.local",
             "SCAN_REPORT_PATH": "/tmp/scan-report.json",
@@ -36,6 +37,7 @@ class ScannerConfigTest(unittest.TestCase):
         self.assertEqual(config.position_size, 1500)
         self.assertTrue(config.require_forecast)
         self.assertEqual(config.forecast_periods, 12)
+        self.assertEqual(config.forecast_top_n, 15)
         self.assertEqual(config.forecast_edge, -0.0001)
         self.assertEqual(config.forecast_max_relative_std, 1.5)
         self.assertEqual(config.forecast_min_predicted, 0.0001)

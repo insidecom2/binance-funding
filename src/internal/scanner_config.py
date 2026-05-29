@@ -19,6 +19,7 @@ class ScannerConfig:
     forecast_max_residual_std: float
     forecast_max_relative_std: float
     forecast_min_predicted: float
+    forecast_top_n: int
     telegram_bot_token: str
     telegram_chat_id: str
     telegram_notify_cooldown_minutes: int
@@ -50,6 +51,7 @@ def build_scanner_config(base_dir: str) -> ScannerConfig:
         forecast_max_residual_std=float(os.getenv("FORECAST_MAX_RESIDUAL_STD", "0.0012")),
         forecast_max_relative_std=float(os.getenv("FORECAST_MAX_RELATIVE_STD", "1.5")),
         forecast_min_predicted=float(os.getenv("FORECAST_MIN_PREDICTED", "0.0001")),
+        forecast_top_n=int(os.getenv("FORECAST_TOP_N", "20")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         telegram_notify_cooldown_minutes=int(os.getenv("TELEGRAM_NOTIFY_COOLDOWN_MINUTES", "5")),

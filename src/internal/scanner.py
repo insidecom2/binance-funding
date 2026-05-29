@@ -43,6 +43,7 @@ def scan_market(config: ScannerConfig, emit_side_effects: bool = True) -> list:
     if not config.require_forecast:
         return opportunities
 
+    forecast_candidates = opportunities[: max(0, config.forecast_top_n)]
     print("⚙️ Enriching forecast for funding opportunities...")
     print(
         "🛠️ Forecast config: "
@@ -50,10 +51,11 @@ def scan_market(config: ScannerConfig, emit_side_effects: bool = True) -> list:
         f"min_points={config.forecast_min_points}, min_r2={config.forecast_min_r2}, "
         f"max_residual_std={config.forecast_max_residual_std}, "
         f"max_relative_std={config.forecast_max_relative_std}, "
-        f"min_predicted={config.forecast_min_predicted}"
+        f"min_predicted={config.forecast_min_predicted}, "
+        f"top_n={config.forecast_top_n}"
     )
     enrich_opportunities_with_forecast(
-        opportunities,
+        forecast_candidates,
         forecast_periods=config.forecast_periods,
         prediction_edge=config.forecast_edge,
         forecast_min_points=config.forecast_min_points,
@@ -63,10 +65,10 @@ def scan_market(config: ScannerConfig, emit_side_effects: bool = True) -> list:
         forecast_min_predicted=config.forecast_min_predicted,
         max_workers=8,
     )
-    print_forecast_debug(opportunities)
+    print_forecast_debug(forecast_candidates)
     if emit_side_effects:
-        save_forecast_passed_symbols_to_mysql(opportunities, config)
-        notify_forecast_passed_symbols(opportunities, config)
+        save_forecast_passed_symbols_to_mysql(forecast_candidates, config)
+        notify_forecast_passed_symbols(forecast_candidates, config)
     return opportunities
 
 

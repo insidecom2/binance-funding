@@ -23,6 +23,7 @@ def _config(require_forecast=True):
         forecast_max_residual_std=0.0012,
         forecast_max_relative_std=1.5,
         forecast_min_predicted=0.0001,
+        forecast_top_n=20,
         telegram_bot_token="",
         telegram_chat_id="",
         telegram_notify_cooldown_minutes=5,
@@ -96,6 +97,45 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(result, mock_analyze.return_value["filtered"])
         self.assertTrue(any("BTCUSDT" in line for line in captured))
         mock_write_report.assert_called_once()
+
+    @patch("src.internal.scanner.notify_forecast_passed_symbols")
+    @patch("src.internal.scanner.save_forecast_passed_symbols_to_mysql")
+    @patch("src.internal.scanner.print_forecast_debug")
+    @patch("src.internal.scanner.enrich_opportunities_with_forecast")
+    @patch("src.internal.scanner.get_all_current_funding_opportunities")
+    def test_scan_market_enriches_only_forecast_top_n_candidates(
+        self,
+        mock_get_opportunities,
+        mock_enrich,
+        mock_print_debug,
+        mock_save_mysql,
+        mock_notify,
+    ):
+        opportunities = []
+        for idx in range(5):
+            opportunities.append(
+                {
+                    "symbol": f"SYM{idx}",
+                    "max_rate": {"value": 0.001 - (idx * 0.0001), "mark_price": 100.0},
+                    "opportunity_score": {"overall_score": 50},
+                }
+            )
+        mock_get_opportunities.return_value = opportunities
+        config = _config(require_forecast=True)
+        config = type(config)(**{**config.__dict__, "forecast_top_n": 2})
+
+        from src.internal.scanner import scan_market
+
+        result = scan_market(config)
+
+        self.assertEqual(result, opportunities)
+        mock_enrich.assert_called_once()
+        enriched_arg = mock_enrich.call_args.args[0]
+        self.assertEqual(len(enriched_arg), 2)
+        self.assertEqual([opp["symbol"] for opp in enriched_arg], ["SYM0", "SYM1"])
+        mock_print_debug.assert_called_once_with(enriched_arg)
+        mock_save_mysql.assert_called_once_with(enriched_arg, config)
+        mock_notify.assert_called_once_with(enriched_arg, config)
 
     @patch("src.internal.scanner.write_scan_report")
     @patch("src.internal.scanner.notify_forecast_passed_symbols")
