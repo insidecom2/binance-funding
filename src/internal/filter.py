@@ -21,7 +21,7 @@ def select_best_opportunity(filtered):
     return filtered[0] if filtered else None
 
 
-def filter_opportunities(
+def analyze_opportunities(
     opportunities,
     min_basis=0.0002,
     min_funding=0.0007,
@@ -47,7 +47,7 @@ def filter_opportunities(
     next_funding_time ถูก log ไว้ใน candidate แต่ไม่ใช้เป็น hard gate —
     ควรเช็คที่ execution layer แทน เพื่อให้ scanner หาโอกาสได้ตลอดเวลา
 
-    Returns a list sorted by net_profit desc, then risk asc.
+    Returns a dict with filtered candidates and reject counts.
     """
     filtered = []
     reject_counts = {
@@ -150,4 +150,32 @@ def filter_opportunities(
     )
 
     print("[FILTER] Reject summary:", reject_counts)
-    return filtered
+    return {
+        "filtered": filtered,
+        "reject_counts": reject_counts,
+    }
+
+
+def filter_opportunities(
+    opportunities,
+    min_basis=0.0002,
+    min_funding=0.0007,
+    min_volume=500_000,
+    max_spread=0.002,
+    max_risk=0.5,
+    max_rounds=10,
+    position_size=1000,
+    require_forecast=False,
+):
+    analysis = analyze_opportunities(
+        opportunities,
+        min_basis=min_basis,
+        min_funding=min_funding,
+        min_volume=min_volume,
+        max_spread=max_spread,
+        max_risk=max_risk,
+        max_rounds=max_rounds,
+        position_size=position_size,
+        require_forecast=require_forecast,
+    )
+    return analysis["filtered"]

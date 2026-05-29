@@ -354,23 +354,8 @@ def enrich_opportunities_with_forecast(
     max_workers=5,
 ):
     """Populate funding_forecast for each provided opportunity in parallel."""
-    # Filter opportunities by funding rate before enrichment
     if not opportunities:
         return opportunities
-    filtered_opps = []
-    for opp in opportunities:
-        # Try to get funding rate from common keys
-        rate = None
-        if 'max_rate' in opp and isinstance(opp['max_rate'], dict):
-            rate = opp['max_rate'].get('value')
-        elif 'funding_rate' in opp:
-            rate = opp['funding_rate']
-        if rate is not None and 0.0005 <= rate <= 0.0010:
-            filtered_opps.append(opp)
-    if not filtered_opps:
-        print("[⚠️] No opportunities in funding range 0.0005-0.0010. Skipping forecast enrichment.")
-        return []
-    opportunities = filtered_opps
 
     import time
     def _compute_for_opp(opp):

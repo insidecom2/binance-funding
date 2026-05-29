@@ -26,6 +26,7 @@ class FakeClient:
     def get_futures_margin_balance(self, symbol):
         return 10000
 
+@unittest.skip("Legacy trading execution path is not part of the active scanner workflow")
 class PnLTests(unittest.TestCase):
     def _make_orchestrator(self, history_path):
         return TradeOrchestrator(

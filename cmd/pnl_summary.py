@@ -3,18 +3,15 @@
 Show PnL and fee summary from trade history (JSON file)
 """
 import argparse
-import os
-from src.internal.trading import TradeOrchestrator
+
+from src.internal.trade_history import summarize_trade_history
 
 def main():
     parser = argparse.ArgumentParser(description="Show PnL and fee summary from trade history.")
     parser.add_argument('--history', type=str, default='.trade_history.json', help='Path to trade history JSON file')
     args = parser.parse_args()
 
-    # Minimal config for TradeOrchestrator
-    config = {'trade_history_path': args.history}
-    orchestrator = TradeOrchestrator(binance_client=None, config=config)
-    summary = orchestrator.get_trade_pnl_summary()
+    summary = summarize_trade_history(args.history)
 
     print("\n=== Trade PnL & Fee Summary ===")
     for k, v in summary.items():

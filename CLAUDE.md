@@ -20,15 +20,21 @@ Strategy: **Short Futures + Long Spot** (delta-neutral hedge) เพื่อร
 ## โครงสร้างไฟล์หลัก
 
 ```
-cmd/main.py                   # Entry point (phase7_forecast_auto_trade)
+cmd/main.py                   # Scanner-only entry point
 src/binance/binance_funding.py # Binance API client
+src/internal/scanner.py        # Scanner orchestration (forecast -> filter -> report)
+src/internal/scanner_config.py # Scanner env/config factory
 src/internal/filter.py         # Filter pipeline (7 gates)
 src/internal/funding.py        # Funding scanner + forecast enrichment
-src/internal/trading.py        # TradeOrchestrator (ยังไม่ได้เปิดใช้งาน)
+src/internal/trading.py        # Compatibility shim -> legacy_trading
+src/internal/legacy_trading.py # Legacy TradeOrchestrator implementation
+src/internal/trade_history.py  # Trade history persistence/summary helpers
 src/internal/basis.py          # Basis calculation
 src/internal/spread.py         # Spread calculation
 src/internal/volume.py         # Volume fetching
 src/internal/mysql_logger.py   # MySQL logging
+src/internal/funding_log_sink.py # Forecast funding_logs adapter
+src/internal/telegram_notifier.py # Telegram adapter
 src/xgb/risk_predictor.py      # XGBoost risk + fee calculation
 ```
 
@@ -153,7 +159,7 @@ fee เดิมนับแค่ futures ($0.80) — แก้แล้วใ�
 
 ## Trading Orchestration (ยังไม่ได้เปิด)
 
-`src/internal/trading.py` — `TradeOrchestrator`
+`src/internal/legacy_trading.py` — `TradeOrchestrator`
 
 ความสามารถที่มีแล้ว:
 - คำนวณขนาด position (futures qty + spot qty)

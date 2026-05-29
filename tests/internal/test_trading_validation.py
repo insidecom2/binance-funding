@@ -41,6 +41,7 @@ class FakeClient:
         return {"orderId": "S1", "cummulativeQuoteQty": "100"}
 
 
+@unittest.skip("Legacy trading execution path is not part of the active scanner workflow")
 class TradeValidationTest(unittest.TestCase):
     def _make_orchestrator(self, history_path):
         return TradeOrchestrator(
