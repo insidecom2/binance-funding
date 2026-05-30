@@ -2,6 +2,11 @@
 
 This folder splits the next-step execution plan into phase files.
 
+## New Trading System Docs
+
+1. trading-system-architecture.md
+2. trading-system-task-split.md
+
 ## Phase Files
 
 1. phase-0-mysql-funding-logs.md
@@ -27,3 +32,4 @@ This folder splits the next-step execution plan into phase files.
 - End-to-end dry-run path works from scanner to trade history
 - Live mode remains guarded by explicit env flags
 - Precision and risk controls verified with tests
+- New trading system responsibilities and phased implementation order are documented
