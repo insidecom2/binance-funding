@@ -8,10 +8,14 @@ from src.internal.trading_system.models import (
     TradeState,
     TradeStateError,
 )
+from src.internal.trading_system.selection import SelectionReject, SelectionResult, SelectionService
 
 __all__ = [
     "FileTradeLedger",
     "LedgerTransitionError",
+    "SelectionReject",
+    "SelectionResult",
+    "SelectionService",
     "TradeEvent",
     "TradeEventType",
     "TradeRecord",
